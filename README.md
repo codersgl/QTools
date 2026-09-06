@@ -135,7 +135,13 @@ Linux 构建需要 `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patc
 
 在仓库 Settings → Secrets and variables → Actions 里添加两个仓库级 secret，`release.yml` 会取用：`TAURI_SIGNING_PRIVATE_KEY`（私钥文件全文）与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（口令文件全文）。缺了它们就产不出 `latest.json` 与 `.sig`，客户端「检查更新」会拿到 404。
 
-重新生成：`npx tauri signer generate -w .secrets/qtools-updater.key`，然后必须同步替换配置里的 `pubkey`。**私钥或口令一旦丢失，已经装出去的旧版本就永远收不到更新**（签名无法通过校验），只能让用户手动重装带新公钥的安装包。
+重新生成：`npx tauri signer generate -w .secrets/qtools-updater.key`（覆盖已有密钥要再加 `-f`），然后必须同步替换配置里的 `pubkey`。私钥与口令文件已设 Windows 只读属性以防误编辑，覆盖写之前先清掉：
+
+```powershell
+Set-ItemProperty .secrets\qtools-updater.key -Name IsReadOnly -Value $false
+```
+
+`.secrets/` 在 gitignore 里，意味着 `git clean -xdf` 或直接删项目目录会连私钥一起清掉，git 也救不回来——务必在仓库之外另存一份（密码管理器最合适；同盘复制只挡误删，不挡丢盘）。**私钥或口令一旦丢失，已经装出去的旧版本就永远收不到更新**（签名无法通过校验），只能让用户手动重装带新公钥的安装包。
 
 `tauri-action` 会生成并上传 `latest.json`：每个平台的 job 先读取 Release 上已有的该附件、合并自己的 `platforms` 条目（`windows-x86_64` / `darwin-aarch64` / `linux-x86_64` 等），再删掉旧附件重新上传，所以五套产物能汇进同一份。这个读-改-写不是原子的，两个 job 恰好同时完成时仍可能丢掉一方的条目，发版后值得核对一次。Windows 的更新包取 NSIS 的 `setup.exe`（`updaterJsonPreferNsis: true`），与 `plugins.updater.windows.installMode: passive` 相对应。
 
