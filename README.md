@@ -14,6 +14,7 @@
 - 系统托盘图标：左键切换显示 / 隐藏，右键菜单「显示窗口 / 退出」
 - 聚焦时自动读取剪贴板并填入输入框（可在设置中关闭）；自动填入且未被编辑过的内容会在窗口隐藏时从界面状态中清除
 - 主题跟随系统 / 强制浅色 / 强制深色；系统主题运行时变更会即时生效
+- **自动更新** — 设置面板底部「更新」区显示当前版本，可检查 GitHub Releases 上的新版本，一键下载并用 minisign 签名校验后安装重启；Linux 下只有 AppImage 能被自更新（`.deb` / `.rpm` 没有对应更新产物）
 
 **LLM 能力**
 
@@ -89,6 +90,16 @@ npm run tauri build
 
 产物位于 `src-tauri/target/release/bundle/`。发布配置已开启 `lto`、`opt-level=3`、`codegen-units=1`、`strip`，并设置 `panic = "abort"`。
 
+`bundle.createUpdaterArtifacts` 已打开，所以本地打生产包也要提供 updater 私钥，否则打包阶段直接失败：
+
+```powershell
+$env:TAURI_SIGNING_PRIVATE_KEY_PATH = ".secrets\qtools-updater.key"
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = Get-Content .secrets\qtools-updater.key.password -Raw
+npm run tauri build
+```
+
+`cargo check` 与 `npm run tauri dev` 都不需要签名。
+
 其他命令：
 
 ```bash
@@ -108,8 +119,25 @@ Linux 构建需要 `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patc
 
 需要注意：
 
-- **产物未签名**。没有配置 Apple 公证与 Windows 代码签名证书，macOS 首次打开要右键 →「打开」绕过 Gatekeeper，Windows 会弹 SmartScreen 提示。也没有配置 updater 签名密钥，因此 Release 附件不含签名文件，将来要接自动更新需另配 `TAURI_SIGNING_PRIVATE_KEY`。
+- **应用本身仍未做代码签名**。updater 用的是 minisign 签名，只用来校验更新包的完整性与来源，与操作系统信任链无关，所以 macOS 首次打开仍需右键 →「打开」绕过 Gatekeeper，Windows 仍会弹「未知发布者」的 SmartScreen 提示。
+- **预发布标签不会成为更新源**。更新端点是 `releases/latest/download/latest.json`，而 GitHub 的 `latest` 接口会跳过 prerelease，所以 `v0.2.0-beta.1` 这类标签发布后，客户端能收到的仍是上一个稳定版。
 - **`releaseDraft: false`** 表示流水线一跑完 Release 就直接公开。想先审阅再手动发布，把 `release.yml` 里这一项改成 `true`。
+
+### 自动更新密钥
+
+`tauri.conf.json` 的 `plugins.updater.pubkey` 是公钥，本就该随应用分发；私钥与口令放在本机 `.secrets/`（已 gitignore，务必另做仓库外备份）：
+
+| 文件 | 作用 |
+|---|---|
+| `qtools-updater.key` | 私钥，签名更新包 |
+| `qtools-updater.key.pub` | 公钥，其内容即配置里的 `pubkey` |
+| `qtools-updater.key.password` | 私钥口令 |
+
+在仓库 Settings → Secrets and variables → Actions 里添加两个仓库级 secret，`release.yml` 会取用：`TAURI_SIGNING_PRIVATE_KEY`（私钥文件全文）与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（口令文件全文）。缺了它们就产不出 `latest.json` 与 `.sig`，客户端「检查更新」会拿到 404。
+
+重新生成：`npx tauri signer generate -w .secrets/qtools-updater.key`，然后必须同步替换配置里的 `pubkey`。**私钥或口令一旦丢失，已经装出去的旧版本就永远收不到更新**（签名无法通过校验），只能让用户手动重装带新公钥的安装包。
+
+`tauri-action` 会生成并上传 `latest.json`：每个平台的 job 先读取 Release 上已有的该附件、合并自己的 `platforms` 条目（`windows-x86_64` / `darwin-aarch64` / `linux-x86_64` 等），再删掉旧附件重新上传，所以五套产物能汇进同一份。这个读-改-写不是原子的，两个 job 恰好同时完成时仍可能丢掉一方的条目，发版后值得核对一次。Windows 的更新包取 NSIS 的 `setup.exe`（`updaterJsonPreferNsis: true`），与 `plugins.updater.windows.installMode: passive` 相对应。
 
 ## 数据存储
 
@@ -150,6 +178,7 @@ Linux 构建需要 `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patc
 - **输出上限交给服务端，截断如实上报** — 请求不发送 `max_tokens`：显式上限会把长回答拦腰截断，而推理模型的思考与正文共用这份预算，截断得更早。改为读取 `finish_reason`，等于 `"length"` 时在输出下方提示被截断
 - **请求规模受限** — 单次用户输入上限 8000 字（按码点计）；连接 20s、流式 45s 无进展即中止，避免悬挂的代理把界面永久卡在加载态
 - **Capabilities 最小化** — `src-tauri/capabilities/default.json` 只声明实际用到的权限，窗口权限单独授予 `allow-start-dragging` 而非整个 `core:window:default`
+- **更新包必须过签名校验** — 端点是写死的 HTTPS GitHub Release 附件，校验用公钥编译进二进制，签名不符的包不会被安装；私钥只存在于本机与 CI secret，不进仓库
 
 若新增其他供应商，需同步把它的域名加入 `tauri.conf.json` 的 `connect-src`、`api.ts` 的 `PROVIDERS` 以及 `config.rs` 的 `KNOWN_PROVIDERS`，否则请求会被 CSP 或凭据白名单拦下。
 
@@ -160,6 +189,7 @@ src/
 ├── App.tsx                    # 主界面：翻译 / 命名 / 自定义提示词三类面板
 ├── components/
 │   ├── SettingsPanel.tsx      # 设置浮层：供应商、模型、Key、主题、快捷键、自启动、提示词管理
+│   ├── UpdateSection.tsx      # 设置浮层底部：当前版本、检查更新、下载进度与安装重启
 │   └── ui/                    # shadcn/ui 组件
 ├── services/
 │   └── api.ts                 # LLM 调用：供应商注册表、chat / chatStream（SSE 解析）

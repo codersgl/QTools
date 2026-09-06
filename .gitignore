@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# updater 签名私钥与口令，仅本地构建使用，绝不提交
+.secrets/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

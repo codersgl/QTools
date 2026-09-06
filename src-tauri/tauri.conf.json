@@ -29,6 +29,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -36,5 +37,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQxMzFDRTUzNTBCMzlFNzkKUldSNW5yTlFVODR4MGZVVDh4MStLeEtsK0s2L3NCL2p3T2FNdkx6dlJhK1VYRm1qSnMrTitpMGMK",
+      "endpoints": [
+        "https://github.com/codersgl/QTools/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

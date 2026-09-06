@@ -61,11 +61,16 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 更新包用 minisign 私钥签名，客户端以 tauri.conf.json 里的 pubkey 校验
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           # __VERSION__ 由 tauri.conf.json 的 version 填充，与 v* 触发规则一致
           tagName: v__VERSION__
           releaseName: QTools v__VERSION__
           releaseCommitish: ${{ github.sha }}
+          # Windows 更新走 NSIS 的 setup.exe，与 tauri.conf.json 的 windows.installMode 对应
+          updaterJsonPreferNsis: true
           releaseBody: |
             ## 安装
 

@@ -16,6 +16,7 @@ import { X, KeyRound, Trash2, Eye, EyeOff, Plus, Pencil, Check } from "lucide-re
 import { PROVIDERS, supportsThinking } from "@/services/api";
 import { parseTemplateVariables } from "@/lib/template";
 import { THINKING_OPTIONS, type AppConfig, type CustomPrompt, type ThinkingMode } from "@/types";
+import { UpdateSection } from "@/components/UpdateSection";
 
 interface SettingsPanelProps {
   open: boolean;
@@ -711,6 +712,8 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
               </div>
             )}
           </div>
+
+          <UpdateSection />
 
           {notice && !error && <p className="text-xs text-muted-foreground">{notice}</p>}
           {error && <p className="text-xs break-words text-destructive">{error}</p>}
