@@ -49,6 +49,12 @@ export function supportsThinking(providerId: string): boolean {
   return (getProvider(providerId)?.thinking ?? "none") !== "none";
 }
 
+/** 档位名到 DeepSeek `reasoning_effort` 取值的白名单映射。 */
+const DEEPSEEK_EFFORT: Partial<Record<ThinkingMode, string>> = {
+  low: "low",
+  high: "high",
+};
+
 /**
  * 思考档位 → 请求体字段。`auto` 完全不下发，跟随模型默认行为；
  * 未声明思考能力的供应商一律不下发，避免被服务端判成未知参数。
@@ -60,10 +66,11 @@ function buildThinkingParams(
   if (mode === "auto") return {};
   if (getProvider(providerId)?.thinking !== "deepseek") return {};
   if (mode === "off") return { thinking: { type: "disabled" } };
-  return {
-    thinking: { type: "enabled" },
-    reasoning_effort: mode,
-  };
+
+  // mode 来自磁盘上的 config.json，被手改成非法值时不该原样转给服务端
+  const effort = DEEPSEEK_EFFORT[mode];
+  if (!effort) return {};
+  return { thinking: { type: "enabled" }, reasoning_effort: effort };
 }
 
 export type TranslateDirection = "auto" | "zh2en" | "en2zh";

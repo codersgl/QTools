@@ -116,18 +116,22 @@ fn open_external(url: String) -> Result<(), String> {
     let mut command = {
         #[cfg(target_os = "windows")]
         {
-            std::process::Command::new("explorer")
+            // 绝对路径，避免程序名经 PATH 解析被抢占
+            let root =
+                std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+            std::process::Command::new(format!(r"{root}\explorer.exe"))
         }
         #[cfg(target_os = "macos")]
         {
-            std::process::Command::new("open")
+            std::process::Command::new("/usr/bin/open")
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
             std::process::Command::new("xdg-open")
         }
     };
-    // 参数直接进 CreateProcess，不经 shell 解析，无注入面。
+    // 参数直接进 CreateProcess、不经 shell，因此不会被拼接出命令；
+    // 上面的绝对路径解决的是程序名本身被劫持的问题。
     command
         .arg(url)
         .spawn()

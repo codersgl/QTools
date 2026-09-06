@@ -250,6 +250,13 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
   }
 
   async function handleSave() {
+    // loadSettings 还没跑完（或中途失败）时表单里全是默认值，此时保存会用默认值
+    // 覆盖掉真实的 provider/model/theme 并清空自定义提示词
+    if (!baselineRef.current) {
+      setError("配置尚未加载完成，请稍候再试");
+      return;
+    }
+
     setSaving(true);
     setError("");
     setNotice("");
@@ -277,7 +284,15 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
         await invoke("set_autostart", { enable: autostart });
       }
 
-      await invoke("save_config", { config: draftConfig() });
+      // 窗口位置由 native 在失焦时写入，保存当下重新读取，绝不拿前端状态回填
+      const current = (await invoke("get_config")) as AppConfig;
+      await invoke("save_config", {
+        config: {
+          ...draftConfig(),
+          window_x: current.window_x,
+          window_y: current.window_y,
+        },
+      });
     } catch (e) {
       // 配置未写入，界面保持打开让用户改；这里不再刷新主界面避免显示半套状态
       setError(e instanceof Error ? e.message : String(e));
