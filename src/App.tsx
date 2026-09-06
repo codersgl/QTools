@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { check } from "@tauri-apps/plugin-updater";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -41,11 +41,6 @@ import {
   type TranslateDirection,
 } from "@/services/api";
 import { SettingsPanel } from "@/components/SettingsPanel";
-import {
-  MarkdownOutput,
-  ThinkingBlock,
-  TruncatedNotice,
-} from "@/components/MarkdownOutput";
 import { missingTemplateVars, parseTemplateVariables } from "@/lib/template";
 import { copyText } from "@/lib/clipboard";
 import {
@@ -56,6 +51,12 @@ import {
   type CustomPrompt,
   type ThinkingMode,
 } from "@/types";
+
+/**
+ * 结果区按需加载：react-markdown 与 remark 插件占主包大半体积，只在有输出时才用得上。
+ * 必须声明在模块顶层——放进组件里会每次渲染生成新的 lazy 类型，子树被反复卸载重建。
+ */
+const OutputArea = lazy(() => import("@/components/OutputArea"));
 
 const DIRECTION_OPTIONS: { value: TranslateDirection; label: string }[] = [
   { value: "auto", label: "自动" },
@@ -426,20 +427,15 @@ function TranslatePanel({ config, getApiKey, clipboardText, wipeToken }: PanelPr
       {loading && !stream.output && !stream.thinking && (
         <p className="text-xs text-muted-foreground">等待模型响应 · {elapsed}s</p>
       )}
-      {(stream.output || stream.thinking) && (
-        <>
-          <Separator />
-          <ThinkingBlock
-            text={stream.thinking}
-            active={loading && !stream.output}
-            seconds={elapsed}
-          />
-          {stream.output && (
-            <MarkdownOutput content={stream.output} streaming={loading} />
-          )}
-          {stream.truncated && <TruncatedNotice />}
-        </>
-      )}
+      <Suspense fallback={null}>
+        <OutputArea
+          thinking={stream.thinking}
+          output={stream.output}
+          truncated={stream.truncated}
+          loading={loading}
+          elapsed={elapsed}
+        />
+      </Suspense>
     </div>
   );
 }
@@ -735,20 +731,15 @@ function CustomPromptPanel({
       {loading && !stream.output && !stream.thinking && (
         <p className="text-xs text-muted-foreground">等待模型响应 · {elapsed}s</p>
       )}
-      {(stream.output || stream.thinking) && (
-        <>
-          <Separator />
-          <ThinkingBlock
-            text={stream.thinking}
-            active={loading && !stream.output}
-            seconds={elapsed}
-          />
-          {stream.output && (
-            <MarkdownOutput content={stream.output} streaming={loading} />
-          )}
-          {stream.truncated && <TruncatedNotice />}
-        </>
-      )}
+      <Suspense fallback={null}>
+        <OutputArea
+          thinking={stream.thinking}
+          output={stream.output}
+          truncated={stream.truncated}
+          loading={loading}
+          elapsed={elapsed}
+        />
+      </Suspense>
     </div>
   );
 }
