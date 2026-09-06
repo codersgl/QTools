@@ -30,6 +30,11 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "publisher": "codersgl",
+    "homepage": "https://github.com/codersgl/QTools",
+    "category": "Utility",
+    "shortDescription": "常驻托盘的快捷翻译与命名助手",
+    "longDescription": "按下全局快捷键即可唤出一个置顶浮窗，完成翻译、变量命名，或运行你自己定义的提示词任务，失焦自动隐藏。",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
