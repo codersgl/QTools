@@ -14,7 +14,7 @@
 - 系统托盘图标：左键切换显示 / 隐藏，右键菜单「显示窗口 / 退出」
 - 聚焦时自动读取剪贴板并填入输入框（可在设置中关闭）；自动填入且未被编辑过的内容会在窗口隐藏时从界面状态中清除
 - 主题跟随系统 / 强制浅色 / 强制深色；系统主题运行时变更会即时生效
-- **自动更新** — 设置面板底部「更新」区显示当前版本，可检查 GitHub Releases 上的新版本，一键下载并用 minisign 签名校验后安装重启；Linux 下只有 AppImage 能被自更新（`.deb` / `.rpm` 没有对应更新产物）
+- **自动更新** — 启动后向 GitHub Releases 静默探测一次，有新版时在设置齿轮上标个小圆点；设置面板底部「更新」区显示当前版本，可一键下载并用 minisign 签名校验后安装重启。启动那次探测可在设置中关闭，手动检查始终可用；Linux 下只有 AppImage 能被自更新（`.deb` / `.rpm` 没有对应更新产物）
 
 **LLM 能力**
 
@@ -160,7 +160,8 @@ Set-ItemProperty .secrets\qtools-updater.key -Name IsReadOnly -Value $false
   "shortcut": "Alt+Space",
   "window_x": null,
   "window_y": null,
-  "clipboard_auto_read": true
+  "clipboard_auto_read": true,
+  "auto_check_updates": true
 }
 ```
 
@@ -194,8 +195,9 @@ Set-ItemProperty .secrets\qtools-updater.key -Name IsReadOnly -Value $false
 src/
 ├── App.tsx                    # 主界面：翻译 / 命名 / 自定义提示词三类面板
 ├── components/
+│   ├── OutputArea.tsx         # 三类面板共用的结果区（思考 + Markdown + 截断提示），懒加载拆分点
 │   ├── SettingsPanel.tsx      # 设置浮层：供应商、模型、Key、主题、快捷键、自启动、提示词管理
-│   ├── UpdateSection.tsx      # 设置浮层底部：当前版本、检查更新、下载进度与安装重启
+│   ├── UpdateSection.tsx      # 设置浮层底部：当前版本、检查/下载/安装更新，可被启动探测自动展开
 │   └── ui/                    # shadcn/ui 组件
 ├── services/
 │   └── api.ts                 # LLM 调用：供应商注册表、chat / chatStream（SSE 解析）
@@ -204,7 +206,7 @@ src/
 
 src-tauri/
 ├── src/
-│   ├── lib.rs                 # 应用装配：托盘、全局快捷键、窗口事件、11 个 command
+│   ├── lib.rs                 # 应用装配：托盘、全局快捷键、窗口事件、14 个 command
 │   ├── config.rs              # 配置读写（原子 + 加锁）与 keyring 封装
 │   └── main.rs                # 进程入口
 ├── capabilities/default.json  # 渲染层权限白名单

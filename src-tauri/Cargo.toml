@@ -1,6 +1,6 @@
 [package]
 name = "qtools"
-version = "0.1.0"
+version = "0.1.1"
 description = "QTools - 快捷翻译与命名助手"
 authors = ["codersgl"]
 edition = "2021"
