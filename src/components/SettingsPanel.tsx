@@ -13,27 +13,9 @@ import {
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { X, KeyRound, Trash2, Eye, EyeOff, Plus, Pencil, Check } from "lucide-react";
-import { PROVIDERS } from "@/services/api";
-
-interface CustomPrompt {
-  id: string;
-  name: string;
-  system_prompt: string;
-  placeholder: string;
-}
-
-interface AppConfig {
-  provider: string;
-  model: string;
-  custom_model: string;
-  theme: string;
-  custom_prompts: CustomPrompt[];
-  autostart: boolean;
-  shortcut: string;
-  window_x: number | null;
-  window_y: number | null;
-  clipboard_auto_read: boolean;
-}
+import { PROVIDERS, supportsThinking } from "@/services/api";
+import { parseTemplateVariables } from "@/lib/template";
+import { THINKING_OPTIONS, type AppConfig, type CustomPrompt, type ThinkingMode } from "@/types";
 
 interface SettingsPanelProps {
   open: boolean;
@@ -90,6 +72,21 @@ function formatShortcut(shortcut: string): string {
     .join("+");
 }
 
+/** 只比较可编辑字段，顺序无关；window_x/window_y 由 native 维护，不算脏。 */
+function isDirty(baseline: AppConfig, draft: AppConfig): boolean {
+  const fields: (keyof AppConfig)[] = [
+    "provider",
+    "model",
+    "custom_model",
+    "theme",
+    "autostart",
+    "shortcut",
+    "clipboard_auto_read",
+  ];
+  if (fields.some((f) => baseline[f] !== draft[f])) return true;
+  return JSON.stringify(baseline.custom_prompts) !== JSON.stringify(draft.custom_prompts);
+}
+
 export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelProps) {
   const [provider, setProvider] = useState("deepseek");
   const [model, setModel] = useState("deepseek-v4-flash");
@@ -104,16 +101,44 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
   const [customPrompts, setCustomPrompts] = useState<CustomPrompt[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
   const [recording, setRecording] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [editingPrompt, setEditingPrompt] = useState<CustomPrompt | null>(null);
   const [showPromptEditor, setShowPromptEditor] = useState(false);
 
   const recordRef = useRef<HTMLDivElement>(null);
-  const initialAutostartRef = useRef(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const baselineRef = useRef<AppConfig | null>(null);
+  const shortcutBeforeRecordRef = useRef("Alt+Space");
+  /** 用于丢弃过期的 has_api_key 异步结果。 */
+  const providerRef = useRef(provider);
+  providerRef.current = provider;
+
+  function setProviderKeyState(queryProvider: string, keyExists: boolean) {
+    if (providerRef.current !== queryProvider) return;
+    setHasKey(keyExists);
+  }
 
   useEffect(() => {
     if (open) loadSettings();
+  }, [open]);
+
+  // 面板所在窗口无边框且会因失焦隐藏，Esc 是用户预期的关闭方式
+  useEffect(() => {
+    if (!open) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      e.stopPropagation();
+      attemptClose();
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  });
+
+  useEffect(() => {
+    if (open) panelRef.current?.focus();
   }, [open]);
 
   useEffect(() => {
@@ -125,6 +150,7 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
 
       if (e.key === "Escape") {
         setRecording(false);
+        setShortcut(shortcutBeforeRecordRef.current);
         return;
       }
 
@@ -143,6 +169,9 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
             setShortcut(parts.join("+"));
             setRecording(false);
           }
+        } else {
+          // 之前按无响应的键只会静默卡在录制态，这里给出原因
+          setNotice("该键无法作为快捷键，请使用字母、数字或功能键");
         }
       }
     };
@@ -150,30 +179,80 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
     return () => document.removeEventListener("keydown", handler, true);
   }, [recording]);
 
+  function draftConfig(): AppConfig {
+    return {
+      provider,
+      model,
+      custom_model: customModel,
+      theme,
+      custom_prompts: customPrompts,
+      autostart,
+      shortcut,
+      window_x: baselineRef.current?.window_x ?? null,
+      window_y: baselineRef.current?.window_y ?? null,
+      clipboard_auto_read: clipboardAutoRead,
+    };
+  }
+
+  function attemptClose() {
+    if (recording) {
+      setRecording(false);
+      setShortcut(shortcutBeforeRecordRef.current);
+    }
+    if (baselineRef.current && isDirty(baselineRef.current, draftConfig())) {
+      setConfirmDiscard(true);
+      return;
+    }
+    onClose();
+  }
+
   async function loadSettings() {
     const config = (await invoke("get_config")) as AppConfig;
-    const keySet = (await invoke("has_api_key", { provider: config.provider })) as boolean;
     const autoEnabled = (await invoke("is_autostart_enabled")) as boolean;
-    setProvider(config.provider);
-    setModel(config.model);
+    const providerKnown = PROVIDERS.some((p) => p.id === config.provider);
+    const effectiveProvider = providerKnown ? config.provider : "deepseek";
+    const modelList = PROVIDERS.find((p) => p.id === effectiveProvider)?.models ?? [];
+    // 配置里可能残留别的供应商的模型名（手工编辑、或供应商列表变更）
+    const effectiveModel =
+      config.model === "custom" || modelList.includes(config.model)
+        ? config.model
+        : modelList[0];
+    const keySet = (await invoke("has_api_key", { provider: effectiveProvider }).catch(
+      () => false,
+    )) as boolean;
+
+    setProvider(effectiveProvider);
+    setModel(effectiveModel);
     setCustomModel(config.custom_model);
     setTheme(config.theme || "system");
     setShortcut(config.shortcut || "Alt+Space");
     setAutostart(autoEnabled);
-    initialAutostartRef.current = autoEnabled;
     setClipboardAutoRead(config.clipboard_auto_read !== false);
     setCustomPrompts(config.custom_prompts || []);
     setHasKey(keySet);
     setApiKeyInput("");
-    setError("");
+    setError(
+      providerKnown
+        ? ""
+        : `配置中的供应商「${config.provider}」不可用，已回退到 DeepSeek`,
+    );
+    setNotice("");
     setRecording(false);
+    setConfirmDiscard(false);
     setShowPromptEditor(false);
     setEditingPrompt(null);
+    baselineRef.current = {
+      ...config,
+      provider: effectiveProvider,
+      model: effectiveModel,
+      autostart: autoEnabled,
+    };
   }
 
   async function handleSave() {
     setSaving(true);
     setError("");
+    setNotice("");
 
     if (model === "custom" && !customModel.trim()) {
       setError("请输入自定义模型名称");
@@ -182,55 +261,33 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
     }
 
     try {
-      const oldConfig = (await invoke("get_config")) as AppConfig;
-      const oldShortcut = oldConfig.shortcut || "Alt+Space";
-
-      await invoke("save_config", {
-        config: {
-          provider,
-          model,
-          custom_model: customModel,
-          theme,
-          custom_prompts: customPrompts,
-          autostart,
-          shortcut,
-          window_x: oldConfig.window_x,
-          window_y: oldConfig.window_y,
-          clipboard_auto_read: clipboardAutoRead,
-        },
-      });
-
+      // 顺序刻意安排成「失败时不会让配置与系统状态分叉」：
+      // Key 与快捷键、自启动先落到各自的位置，全部成功后才写 config.json。
       if (apiKeyInput.trim()) {
         await invoke("set_api_key", { provider, key: apiKeyInput.trim() });
+        setHasKey(true);
       }
 
-      if (shortcut !== oldShortcut) {
-        await invoke("change_shortcut", { old: oldShortcut, new: shortcut });
+      const status = (await invoke("shortcut_status")) as { active: string };
+      if (shortcut !== status.active) {
+        await invoke("change_shortcut", { new: shortcut });
       }
 
-      // 配置已持久化，先刷新主界面（新增的自定义提示词标签页立即出现）
-      onConfigSaved();
-
-      // 仅在自启动状态确实变化时才调用；失败不阻断已完成的配置保存
-      if (autostart !== initialAutostartRef.current) {
-        try {
-          await invoke("set_autostart", { enable: autostart });
-          initialAutostartRef.current = autostart;
-        } catch (e) {
-          setError(
-            `开机自启动设置失败：${e instanceof Error ? e.message : String(e)}`,
-          );
-          setSaving(false);
-          return;
-        }
+      if (autostart !== (await invoke("is_autostart_enabled"))) {
+        await invoke("set_autostart", { enable: autostart });
       }
 
-      onClose();
+      await invoke("save_config", { config: draftConfig() });
     } catch (e) {
+      // 配置未写入，界面保持打开让用户改；这里不再刷新主界面避免显示半套状态
       setError(e instanceof Error ? e.message : String(e));
-    } finally {
       setSaving(false);
+      return;
     }
+
+    setSaving(false);
+    onConfigSaved();
+    onClose();
   }
 
   async function handleDeleteKey() {
@@ -238,7 +295,7 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
       await invoke("delete_api_key", { provider });
       setHasKey(false);
       setApiKeyInput("");
-      onConfigSaved();
+      setNotice("删除的 API Key 在点击「保存配置」后才会生效");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -250,6 +307,7 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
       name: "",
       system_prompt: "",
       placeholder: "",
+      thinking: "auto",
     });
     setShowPromptEditor(true);
   }
@@ -261,18 +319,25 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
 
   function handleSavePrompt() {
     if (!editingPrompt || !editingPrompt.name.trim() || !editingPrompt.system_prompt.trim()) return;
-    const exists = customPrompts.find((p) => p.id === editingPrompt.id);
-    if (exists) {
-      setCustomPrompts(customPrompts.map((p) => (p.id === editingPrompt.id ? editingPrompt : p)));
-    } else {
-      setCustomPrompts([...customPrompts, editingPrompt]);
-    }
+    const normalized = {
+      ...editingPrompt,
+      name: editingPrompt.name.trim(),
+      system_prompt: editingPrompt.system_prompt,
+      placeholder: editingPrompt.placeholder.trim(),
+    };
+    const exists = customPrompts.some((p) => p.id === normalized.id);
+    setCustomPrompts(
+      exists
+        ? customPrompts.map((p) => (p.id === normalized.id ? normalized : p))
+        : [...customPrompts, normalized],
+    );
     setShowPromptEditor(false);
     setEditingPrompt(null);
   }
 
   function handleDeletePrompt(id: string) {
     setCustomPrompts(customPrompts.filter((p) => p.id !== id));
+    setNotice("自定义提示词的改动需点击「保存配置」才会生效");
   }
 
   if (!open) return null;
@@ -281,11 +346,23 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
   const modelList = currentProvider?.models ?? [];
 
   return (
-    <div className="absolute inset-0 z-50 flex items-start justify-center bg-black/40 pt-4">
-      <div className="flex max-h-[90vh] w-[92%] max-w-sm flex-col overflow-hidden rounded-lg border bg-background shadow-lg">
+    <div
+      className="absolute inset-0 z-50 flex items-start justify-center bg-black/40 pt-4"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) attemptClose();
+      }}
+    >
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="QTools 设置"
+        tabIndex={-1}
+        className="flex max-h-[90vh] w-[92%] max-w-sm flex-col overflow-hidden rounded-lg border bg-background shadow-lg outline-none"
+      >
         <div className="flex shrink-0 items-center justify-between border-b px-4 py-2.5">
           <h2 className="text-sm font-semibold">设置</h2>
-          <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={onClose}>
+          <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={attemptClose}>
             <X className="size-3.5" />
           </Button>
         </div>
@@ -293,17 +370,26 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
         <div className="flex-1 space-y-4 overflow-y-auto p-4">
           {/* Provider & Model */}
           <div className="flex flex-col gap-1.5">
-            <Label className="text-xs">供应商</Label>
+            <Label htmlFor="settings-provider" className="text-xs">供应商</Label>
             <Select
               value={provider}
               onValueChange={(v) => {
                 if (!v) return;
                 setProvider(v);
                 const p = PROVIDERS.find((p) => p.id === v);
-                if (p) setModel(p.models[0]);
+                if (p) {
+                  setModel(p.models[0]);
+                  setCustomModel("");
+                }
+                setApiKeyInput("");
+                setHasKey(false);
+                // 每个供应商的 Key 单独存放，切过去时要把已有的查出来
+                void invoke("has_api_key", { provider: v })
+                  .then((set) => setProviderKeyState(v, Boolean(set)))
+                  .catch(() => {});
               }}
             >
-              <SelectTrigger className="h-8 text-xs">
+              <SelectTrigger id="settings-provider" className="h-8 w-full text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -314,17 +400,22 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
                 ))}
               </SelectContent>
             </Select>
+            <span className="text-[10px] text-muted-foreground">
+              切换供应商会清空下方 API Key 输入框，各供应商的 Key 独立存储
+            </span>
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <Label className="text-xs">模型</Label>
+            <Label htmlFor="settings-model" className="text-xs">模型</Label>
             <Select
               value={modelList.includes(model) ? model : "custom"}
               onValueChange={(v) => {
-                if (v) setModel(v);
+                if (!v) return;
+                setModel(v);
+                if (v !== "custom") setCustomModel("");
               }}
             >
-              <SelectTrigger className="h-8 text-xs">
+              <SelectTrigger id="settings-model" className="h-8 w-full text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -348,19 +439,23 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
 
           {/* API Key */}
           <div className="flex flex-col gap-1.5">
-            <Label className="text-xs">API Key</Label>
+            <Label htmlFor="settings-apikey" className="text-xs">API Key</Label>
             <div className="flex items-center gap-1.5">
               <div className="relative flex-1">
                 <KeyRound className="absolute left-2 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
                 <Input
+                  id="settings-apikey"
                   type={showKey ? "text" : "password"}
                   placeholder={hasKey ? "已配置，输入新 Key 覆盖" : "输入 API Key"}
                   value={apiKeyInput}
                   onChange={(e) => setApiKeyInput(e.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
                   className="h-8 pl-7 pr-7 text-xs"
                 />
                 <button
                   type="button"
+                  aria-label={showKey ? "隐藏 API Key" : "显示 API Key"}
                   className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                   onClick={() => setShowKey(!showKey)}
                 >
@@ -380,9 +475,9 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
 
           {/* Theme */}
           <div className="flex flex-col gap-1.5">
-            <Label className="text-xs">主题</Label>
+            <Label htmlFor="settings-theme" className="text-xs">主题</Label>
             <Select value={theme} onValueChange={(v) => v && setTheme(v)}>
-              <SelectTrigger className="h-8 text-xs">
+              <SelectTrigger id="settings-theme" className="h-8 w-full text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -404,7 +499,12 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
               className={`flex h-8 items-center rounded-md border px-2.5 text-xs transition-colors outline-none ${
                 recording ? "border-primary bg-primary/5" : "bg-background"
               }`}
-              onClick={() => setRecording(true)}
+              onClick={() => {
+                if (recording) return;
+                shortcutBeforeRecordRef.current = shortcut;
+                setNotice("");
+                setRecording(true);
+              }}
             >
               <KeyRound className="mr-1.5 size-3 shrink-0 text-muted-foreground" />
               {recording ? (
@@ -419,6 +519,7 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
                   onClick={(e) => {
                     e.stopPropagation();
                     setRecording(false);
+                    setShortcut(shortcutBeforeRecordRef.current);
                   }}
                 >
                   取消
@@ -426,23 +527,34 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
               )}
             </div>
             <span className="text-[10px] text-muted-foreground">
-              点击输入框，按下组合键（需包含字母/数字/功能键，如 Ctrl+Shift+T）
+              点击输入框，按下组合键（需包含字母/数字/功能键，如 Ctrl+Shift+T）。
+              新组合注册成功后才会替换旧组合，旧组合在此之前仍然有效。
             </span>
           </div>
 
           {/* Autostart */}
           <div className="flex items-center justify-between">
-            <Label className="text-xs">开机自启动</Label>
-            <Switch checked={autostart} onCheckedChange={setAutostart} />
+            <Label htmlFor="settings-autostart" className="text-xs">开机自启动</Label>
+            <Switch
+              id="settings-autostart"
+              checked={autostart}
+              onCheckedChange={setAutostart}
+            />
           </div>
 
           {/* Clipboard */}
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-3">
             <div className="flex flex-col">
-              <Label className="text-xs">自动读取剪贴板</Label>
-              <span className="text-[10px] text-muted-foreground">聚焦时自动填入剪贴板内容</span>
+              <Label htmlFor="settings-clipboard" className="text-xs">自动读取剪贴板</Label>
+              <span className="text-[10px] text-muted-foreground">
+                聚焦时填入剪贴板内容；未编辑过的内容会在窗口隐藏时清除
+              </span>
             </div>
-            <Switch checked={clipboardAutoRead} onCheckedChange={setClipboardAutoRead} />
+            <Switch
+              id="settings-clipboard"
+              checked={clipboardAutoRead}
+              onCheckedChange={setClipboardAutoRead}
+            />
           </div>
 
           {/* Custom Prompts */}
@@ -506,6 +618,21 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
                   }
                   className="min-h-16 text-xs"
                 />
+                <div className="space-y-1 text-[10px] leading-relaxed text-muted-foreground">
+                  <p>
+                    模板变量：<code className="font-mono">{"{{input}}"}</code> 用户输入插槽（含它时整条模板作为单条消息发送）；
+                    <code className="font-mono">{"{{变量名}}"}</code> 文本参数；
+                    <code className="font-mono">{"{{变量名:选项1|选项2}}"}</code> 下拉参数。
+                  </p>
+                  {parseTemplateVariables(editingPrompt.system_prompt).length > 0 && (
+                    <p>
+                      已识别：
+                      {parseTemplateVariables(editingPrompt.system_prompt)
+                        .map((v) => v.name)
+                        .join("、")}
+                    </p>
+                  )}
+                </div>
                 <Input
                   placeholder="输入框占位提示（可选）"
                   value={editingPrompt.placeholder}
@@ -514,6 +641,36 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
                   }
                   className="h-7 text-xs"
                 />
+                <div className="flex items-center gap-1.5">
+                  <Label className="shrink-0 text-[10px] text-muted-foreground">
+                    思考
+                  </Label>
+                  <Select
+                    value={editingPrompt.thinking ?? "auto"}
+                    onValueChange={(v) =>
+                      v && setEditingPrompt({ ...editingPrompt, thinking: v as ThinkingMode })
+                    }
+                  >
+                    <SelectTrigger
+                      className="h-7 flex-1 gap-1 text-xs"
+                      disabled={!supportsThinking(provider)}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {THINKING_OPTIONS.map((o) => (
+                        <SelectItem key={o.value} value={o.value}>
+                          {o.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <p className="text-[10px] leading-relaxed text-muted-foreground">
+                  {supportsThinking(provider)
+                    ? "改写、摘要、翻译这类简单任务选「关闭思考」可以省掉大部分等待时间；需要推理的再调成轻量或充分。"
+                    : "当前供应商的模型列表不支持思考开关，该设置不会生效。"}
+                </p>
                 <div className="flex justify-end gap-1.5">
                   <Button
                     size="sm"
@@ -540,13 +697,38 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
             )}
           </div>
 
-          {error && <p className="text-xs text-destructive">{error}</p>}
+          {notice && !error && <p className="text-xs text-muted-foreground">{notice}</p>}
+          {error && <p className="text-xs break-words text-destructive">{error}</p>}
         </div>
 
         <div className="shrink-0 border-t px-4 py-2.5">
-          <Button className="w-full h-8 text-xs" onClick={handleSave} disabled={saving}>
-            {saving ? "保存中..." : "保存配置"}
-          </Button>
+          {confirmDiscard ? (
+            <div className="flex items-center gap-1.5">
+              <span className="flex-1 text-[10px] text-muted-foreground">
+                有未保存的修改
+              </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 text-xs"
+                onClick={() => setConfirmDiscard(false)}
+              >
+                继续编辑
+              </Button>
+              <Button
+                size="sm"
+                variant="destructive"
+                className="h-7 text-xs"
+                onClick={onClose}
+              >
+                放弃
+              </Button>
+            </div>
+          ) : (
+            <Button className="w-full h-8 text-xs" onClick={handleSave} disabled={saving}>
+              {saving ? "保存中..." : "保存配置"}
+            </Button>
+          )}
         </div>
       </div>
     </div>

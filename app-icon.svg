@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!--
+    QTools brand mark: bold geometric "Q" monogram.
+    Flat single colour on a transparent ground. Stroke weight is deliberately
+    heavy (172/1024) so the ring and counter survive scaling down to the
+    16-32px tray icon sizes that Tauri generates from this source.
+    Render with: magick -background none app-icon.svg app-icon.png
+  -->
+  <g fill="none" stroke="#0EA5E9" stroke-width="172" stroke-linecap="round">
+    <circle cx="500" cy="466" r="262"/>
+    <line x1="596" y1="562" x2="756" y2="722"/>
+  </g>
+</svg>
