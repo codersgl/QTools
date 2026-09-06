@@ -96,6 +96,21 @@ npm run build        # 仅构建前端（tsc + vite build）
 npm run dev          # 仅启动 Vite 开发服务器
 ```
 
+## 持续集成与发布
+
+两个工作流都在 `.github/workflows/` 下。
+
+**`ci.yml`** — `main` 分支的 push 与 PR 触发。一个 job 跑 `npm run build`（`tsc` + `vite build`），另一个 job 在 ubuntu / macOS / Windows 三个系统上分别 `cargo check`，用来兜住平台相关的编译回归。
+
+**`release.yml`** — 推送 `v*` 标签（或在 Actions 页手动触发）时构建五套产物并发布 GitHub Release：macOS aarch64、macOS x86_64、Linux x86_64、Linux arm64、Windows。标签版本号取自 `tauri.conf.json` 的 `version`，所以发版流程是先改 `package.json` 与 `tauri.conf.json` 的版本，再打同名 `v<version>` 标签推上去。
+
+Linux 构建需要 `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils`，工作流里已安装；本地 Linux 构建同样需要它们。
+
+需要注意：
+
+- **产物未签名**。没有配置 Apple 公证与 Windows 代码签名证书，macOS 首次打开要右键 →「打开」绕过 Gatekeeper，Windows 会弹 SmartScreen 提示。也没有配置 updater 签名密钥，因此 Release 附件不含签名文件，将来要接自动更新需另配 `TAURI_SIGNING_PRIVATE_KEY`。
+- **`releaseDraft: false`** 表示流水线一跑完 Release 就直接公开。想先审阅再手动发布，把 `release.yml` 里这一项改成 `true`。
+
 ## 数据存储
 
 **配置文件** — `%APPDATA%\com.codersgl.qtools\config.json`
