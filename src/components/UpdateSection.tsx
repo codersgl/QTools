@@ -27,7 +27,7 @@ function errorMessage(e: unknown): string {
   return `检查更新失败：${text}`;
 }
 
-export function UpdateSection() {
+export function UpdateSection({ autoCheck }: { autoCheck?: boolean }) {
   const [currentVersion, setCurrentVersion] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [update, setUpdate] = useState<Update | null>(null);
@@ -44,7 +44,7 @@ export function UpdateSection() {
     void getVersion().then(setCurrentVersion).catch(() => {});
   }, []);
 
-  // 设置面板关闭即卸载本组件：放弃这次检查结果，避免原生侧资源一直挂着
+  // 面板关闭会卸载本组件：放弃这次检查结果，避免原生侧资源一直挂着
   useEffect(
     () => () => {
       if (!BUSY_PHASES.includes(phaseRef.current)) {
@@ -53,6 +53,11 @@ export function UpdateSection() {
     },
     [],
   );
+
+  // 主程序启动时已确认有新版，打开面板就直接把结果摆出来，省掉一次手动点击
+  useEffect(() => {
+    if (autoCheck) void handleCheck();
+  }, []);
 
   async function handleCheck() {
     const stale = updateRef.current;
@@ -65,7 +70,7 @@ export function UpdateSection() {
       const found = await check({ timeout: 15000 });
       if (!found) {
         setPhase("idle");
-        setMessage(`${formatVersion(currentVersion)} 已是最新版本`);
+        setMessage(currentVersion ? `${formatVersion(currentVersion)} 已是最新版本` : "已是最新版本");
         return;
       }
       setUpdate(found);

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { check } from "@tauri-apps/plugin-updater";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
@@ -765,6 +766,7 @@ function App() {
   const [wipeToken, setWipeToken] = useState(0);
   const [shortcutHint, setShortcutHint] = useState("");
   const [bannerDismissed, setBannerDismissed] = useState(false);
+  const [hasUpdate, setHasUpdate] = useState(false);
   const clipboardAutoReadRef = useRef(true);
 
   const refreshStatus = useCallback(async () => {
@@ -779,6 +781,20 @@ function App() {
       setBannerDismissed(false);
       clipboardAutoReadRef.current = cfg.clipboard_auto_read;
       applyTheme(cfg.theme || "system");
+
+      // 启动后静默探测一次，只用来点亮齿轮；下载交给设置面板，避免两处共享同一个更新资源
+      if (cfg.auto_check_updates) {
+        void check({ timeout: 10000 })
+          .then((found) => {
+            setHasUpdate(Boolean(found));
+            if (found) void found.close().catch(() => {});
+          })
+          .catch(() => {
+            // 离线、或最新 Release 还没有可用更新包时不打扰用户
+          });
+      } else {
+        setHasUpdate(false);
+      }
 
       const status = shortcut as ShortcutStatus | null;
       if (status?.error) {
@@ -887,11 +903,17 @@ function App() {
         <Button
           size="sm"
           variant="ghost"
-          className="h-7 w-7 p-0"
-          title="设置"
+          className="relative h-7 w-7 p-0"
+          title={hasUpdate ? "设置（发现新版本，可更新）" : "设置"}
           onClick={() => setShowSettings(true)}
         >
           <Settings className="size-3.5" />
+          {hasUpdate && (
+            <span
+              aria-hidden
+              className="absolute right-0 top-0 size-2 rounded-full bg-destructive ring-2 ring-background"
+            />
+          )}
         </Button>
       </div>
 
@@ -976,6 +998,7 @@ function App() {
         open={showSettings}
         onClose={() => setShowSettings(false)}
         onConfigSaved={refreshStatus}
+        hasUpdate={hasUpdate}
       />
     </div>
   );

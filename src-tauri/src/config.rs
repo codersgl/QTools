@@ -37,6 +37,7 @@ pub struct AppConfig {
     pub window_x: Option<i32>,
     pub window_y: Option<i32>,
     pub clipboard_auto_read: bool,
+    pub auto_check_updates: bool,
 }
 
 impl Default for AppConfig {
@@ -52,6 +53,7 @@ impl Default for AppConfig {
             window_x: None,
             window_y: None,
             clipboard_auto_read: true,
+            auto_check_updates: true,
         }
     }
 }

@@ -31,6 +31,7 @@ export interface AppConfig {
   window_x: number | null;
   window_y: number | null;
   clipboard_auto_read: boolean;
+  auto_check_updates: boolean;
 }
 
 export const DEFAULT_CONFIG: AppConfig = {
@@ -44,6 +45,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   window_x: null,
   window_y: null,
   clipboard_auto_read: true,
+  auto_check_updates: true,
 };
 
 export function getEffectiveModel(config: AppConfig): string {

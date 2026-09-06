@@ -22,6 +22,8 @@ interface SettingsPanelProps {
   open: boolean;
   onClose: () => void;
   onConfigSaved: () => void;
+  /** 主程序启动时后台检查已确认存在新版本，更新区块免去手动点击。 */
+  hasUpdate: boolean;
 }
 
 const THEMES = [
@@ -83,12 +85,13 @@ function isDirty(baseline: AppConfig, draft: AppConfig): boolean {
     "autostart",
     "shortcut",
     "clipboard_auto_read",
+    "auto_check_updates",
   ];
   if (fields.some((f) => baseline[f] !== draft[f])) return true;
   return JSON.stringify(baseline.custom_prompts) !== JSON.stringify(draft.custom_prompts);
 }
 
-export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelProps) {
+export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: SettingsPanelProps) {
   const [provider, setProvider] = useState("deepseek");
   const [model, setModel] = useState("deepseek-v4-flash");
   const [customModel, setCustomModel] = useState("");
@@ -99,6 +102,7 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
   const [shortcut, setShortcut] = useState("Alt+Space");
   const [autostart, setAutostart] = useState(false);
   const [clipboardAutoRead, setClipboardAutoRead] = useState(true);
+  const [autoCheckUpdates, setAutoCheckUpdates] = useState(true);
   const [customPrompts, setCustomPrompts] = useState<CustomPrompt[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -192,6 +196,7 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
       window_x: baselineRef.current?.window_x ?? null,
       window_y: baselineRef.current?.window_y ?? null,
       clipboard_auto_read: clipboardAutoRead,
+      auto_check_updates: autoCheckUpdates,
     };
   }
 
@@ -229,6 +234,7 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
     setShortcut(config.shortcut || "Alt+Space");
     setAutostart(autoEnabled);
     setClipboardAutoRead(config.clipboard_auto_read !== false);
+    setAutoCheckUpdates(config.auto_check_updates !== false);
     setCustomPrompts(config.custom_prompts || []);
     setHasKey(keySet);
     setApiKeyInput("");
@@ -573,6 +579,21 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
             />
           </div>
 
+          {/* Update check */}
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-col">
+              <Label htmlFor="settings-auto-update" className="text-xs">启动时检查更新</Label>
+              <span className="text-[10px] text-muted-foreground">
+                启动后向 GitHub Releases 静默查一次，有新版时在齿轮上标记；下方仍可手动检查
+              </span>
+            </div>
+            <Switch
+              id="settings-auto-update"
+              checked={autoCheckUpdates}
+              onCheckedChange={setAutoCheckUpdates}
+            />
+          </div>
+
           {/* Custom Prompts */}
           <div className="flex flex-col gap-1.5">
             <div className="flex items-center justify-between">
@@ -713,7 +734,7 @@ export function SettingsPanel({ open, onClose, onConfigSaved }: SettingsPanelPro
             )}
           </div>
 
-          <UpdateSection />
+          <UpdateSection autoCheck={hasUpdate} />
 
           {notice && !error && <p className="text-xs text-muted-foreground">{notice}</p>}
           {error && <p className="text-xs break-words text-destructive">{error}</p>}
