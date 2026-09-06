@@ -16,8 +16,15 @@ function formatVersion(v: string): string {
   return v.startsWith("v") ? v : `v${v}`;
 }
 
+/** 插件失败时 reject 的常是字符串或结构化对象，而不是 Error 实例。 */
+function errorText(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  return JSON.stringify(e);
+}
+
 function errorMessage(e: unknown): string {
-  const text = e instanceof Error ? e.message : String(e);
+  const text = errorText(e);
   if (/404|not found/i.test(text)) {
     return `检查更新失败：最新 Release 里还没有可用的更新包（${text}）`;
   }
@@ -114,7 +121,7 @@ export function UpdateSection({ autoCheck }: { autoCheck?: boolean }) {
     } catch (e) {
       setPhase("error");
       setMessage(
-        e instanceof Error ? e.message : "更新失败，可以从 Release 页面手动下载安装包",
+        `${phaseRef.current === "installing" ? "安装" : "下载"}更新失败：${errorText(e)}`,
       );
     }
   }
