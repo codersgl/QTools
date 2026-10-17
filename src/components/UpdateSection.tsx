@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { Download, RefreshCw } from "lucide-react";
+import { Download, ExternalLink, RefreshCw } from "lucide-react";
+
+const RELEASES_URL = "https://github.com/codersgl/QTools/releases/latest";
 
 type Phase = "idle" | "checking" | "ready" | "downloading" | "installing" | "error";
 
@@ -39,6 +42,8 @@ export function UpdateSection({ autoCheck }: { autoCheck?: boolean }) {
   const updateRef = useRef<Update | null>(update);
   updateRef.current = update;
   const percentRef = useRef<number | null>(null);
+  /** 面板已关闭：迟到的检查结果要自己回收，不能 setState 或留下原生资源。 */
+  const cancelledRef = useRef(false);
 
   useEffect(() => {
     void getVersion().then(setCurrentVersion).catch(() => {});
@@ -47,6 +52,7 @@ export function UpdateSection({ autoCheck }: { autoCheck?: boolean }) {
   // 面板关闭会卸载本组件：放弃这次检查结果，避免原生侧资源一直挂着
   useEffect(
     () => () => {
+      cancelledRef.current = true;
       if (!BUSY_PHASES.includes(phaseRef.current)) {
         void updateRef.current?.close().catch(() => {});
       }
@@ -57,9 +63,12 @@ export function UpdateSection({ autoCheck }: { autoCheck?: boolean }) {
   // 主程序启动时已确认有新版，打开面板就直接把结果摆出来，省掉一次手动点击
   useEffect(() => {
     if (autoCheck) void handleCheck();
-  }, []);
+  }, [autoCheck]);
 
   async function handleCheck() {
+    // 面板可能在上一次检查后被关掉又重新打开（同一个组件实例），
+    // 这里把取消标记复位，否则新的检查结果会被当成过期结果丢掉。
+    cancelledRef.current = false;
     const stale = updateRef.current;
     setUpdate(null);
     setPercent(null);
@@ -68,6 +77,11 @@ export function UpdateSection({ autoCheck }: { autoCheck?: boolean }) {
     if (stale) void stale.close().catch(() => {});
     try {
       const found = await check({ timeout: 15000 });
+      // 检查期间面板被关掉：关闭刚拿到的更新资源，避免泄漏
+      if (cancelledRef.current) {
+        if (found) void found.close().catch(() => {});
+        return;
+      }
       if (!found) {
         setPhase("idle");
         setMessage(currentVersion ? `${formatVersion(currentVersion)} 已是最新版本` : "已是最新版本");
@@ -76,6 +90,7 @@ export function UpdateSection({ autoCheck }: { autoCheck?: boolean }) {
       setUpdate(found);
       setPhase("ready");
     } catch (e) {
+      if (cancelledRef.current) return;
       setPhase("error");
       setMessage(errorMessage(e));
     }
@@ -176,6 +191,18 @@ export function UpdateSection({ autoCheck }: { autoCheck?: boolean }) {
         >
           {message}
         </p>
+      )}
+      {phase === "error" && (
+        <button
+          type="button"
+          className="inline-flex items-center gap-1 self-start text-[10px] text-muted-foreground underline underline-offset-2 hover:text-foreground"
+          onClick={() => {
+            void invoke("open_external", { url: RELEASES_URL }).catch(() => {});
+          }}
+        >
+          <ExternalLink className="size-2.5" />
+          到 Releases 页面手动下载
+        </button>
       )}
       {phase === "idle" && !message && (
         <p className="text-[10px] text-muted-foreground">

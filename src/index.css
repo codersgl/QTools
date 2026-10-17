@@ -74,6 +74,7 @@
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
     --radius: 0.625rem;
+    --link: oklch(0.52 0.18 250);
     --sidebar: oklch(0.985 0 0);
     --sidebar-foreground: oklch(0.145 0 0);
     --sidebar-primary: oklch(0.205 0 0);
@@ -87,6 +88,7 @@
 .dark {
     color-scheme: dark;
     --background: oklch(0.145 0 0);
+    --link: oklch(0.78 0.13 250);
     --foreground: oklch(0.985 0 0);
     --card: oklch(0.205 0 0);
     --card-foreground: oklch(0.985 0 0);
@@ -132,6 +134,8 @@
 }
 
 /* Compact markdown rendering for LLM output */
+/* 长 URL、长标识符不应撑破结果框并给整个窗口加一条横向滚动条 */
+.md-body { overflow-wrap: anywhere; }
 .md-body > :first-child { margin-top: 0; }
 .md-body > :last-child { margin-bottom: 0; }
 .md-body p { margin: 0.4em 0; }
@@ -169,11 +173,18 @@
   margin: 0.5em 0;
   padding-left: 0.8em;
 }
-.md-body a { color: var(--primary); text-decoration: underline; }
+.md-body a {
+  color: var(--link);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 .md-body table {
   border-collapse: collapse;
+  display: block;
   font-size: 0.9em;
   margin: 0.5em 0;
+  max-width: 100%;
+  overflow-x: auto;
   width: 100%;
 }
 .md-body th, .md-body td {
@@ -183,3 +194,42 @@
 }
 .md-body th { background: var(--muted); }
 .md-body hr { border: none; border-top: 1px solid var(--border); margin: 0.7em 0; }
+
+/* 流式输出末尾的光标，让人一眼看出回答还没结束 */
+.md-caret::after {
+  animation: md-caret-blink 1s steps(2, start) infinite;
+  background: currentColor;
+  content: "";
+  display: inline-block;
+  height: 1em;
+  margin-left: 2px;
+  opacity: 0.6;
+  vertical-align: -0.15em;
+  width: 0.45em;
+}
+@keyframes md-caret-blink {
+  50% { opacity: 0; }
+}
+
+/* 480px 小窗里默认滚动条太占地方，统一成细滚动条 */
+* {
+  scrollbar-color: color-mix(in oklch, var(--foreground) 20%, transparent) transparent;
+  scrollbar-width: thin;
+}
+::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--foreground) 20%, transparent);
+  background-clip: content-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklch, var(--foreground) 35%, transparent);
+  background-clip: content-box;
+}

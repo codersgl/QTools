@@ -76,7 +76,7 @@ function formatShortcut(shortcut: string): string {
 }
 
 /** 只比较可编辑字段，顺序无关；window_x/window_y 由 native 维护，不算脏。 */
-function isDirty(baseline: AppConfig, draft: AppConfig): boolean {
+function isConfigDirty(baseline: AppConfig, draft: AppConfig): boolean {
   const fields: (keyof AppConfig)[] = [
     "provider",
     "model",
@@ -89,6 +89,35 @@ function isDirty(baseline: AppConfig, draft: AppConfig): boolean {
   ];
   if (fields.some((f) => baseline[f] !== draft[f])) return true;
   return JSON.stringify(baseline.custom_prompts) !== JSON.stringify(draft.custom_prompts);
+}
+
+/** 正在编辑的提示词是否与打开编辑器时的内容不同。 */
+function isPromptDirty(original: CustomPrompt | null, draft: CustomPrompt): boolean {
+  if (!original) {
+    return Boolean(draft.name.trim() || draft.system_prompt.trim() || draft.placeholder.trim());
+  }
+  return (
+    original.name !== draft.name ||
+    original.system_prompt !== draft.system_prompt ||
+    original.placeholder !== draft.placeholder ||
+    (original.thinking ?? "auto") !== (draft.thinking ?? "auto")
+  );
+}
+
+/** 去掉首尾空白，并保证 thinking 落在联合类型范围内。 */
+function normalizePrompt(prompt: CustomPrompt): CustomPrompt {
+  return {
+    ...prompt,
+    name: prompt.name.trim(),
+    system_prompt: prompt.system_prompt.trim(),
+    placeholder: prompt.placeholder.trim(),
+    thinking: prompt.thinking ?? "auto",
+  };
+}
+
+function upsertPrompt(list: CustomPrompt[], prompt: CustomPrompt): CustomPrompt[] {
+  const exists = list.some((p) => p.id === prompt.id);
+  return exists ? list.map((p) => (p.id === prompt.id ? prompt : p)) : [...list, prompt];
 }
 
 export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: SettingsPanelProps) {
@@ -105,18 +134,24 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
   const [autoCheckUpdates, setAutoCheckUpdates] = useState(true);
   const [customPrompts, setCustomPrompts] = useState<CustomPrompt[]>([]);
   const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  /** 被标记删除、但尚未保存的 API Key 所属供应商。 */
+  const [pendingKeyDelete, setPendingKeyDelete] = useState<string | null>(null);
 
   const [recording, setRecording] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [editingPrompt, setEditingPrompt] = useState<CustomPrompt | null>(null);
+  const [editingOriginal, setEditingOriginal] = useState<CustomPrompt | null>(null);
   const [showPromptEditor, setShowPromptEditor] = useState(false);
 
   const recordRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const baselineRef = useRef<AppConfig | null>(null);
   const shortcutBeforeRecordRef = useRef("Alt+Space");
+  /** 丢弃过期的 loadSettings 结果（例如快速关开面板）。 */
+  const loadSeqRef = useRef(0);
   /** 用于丢弃过期的 has_api_key 异步结果。 */
   const providerRef = useRef(provider);
   providerRef.current = provider;
@@ -130,12 +165,26 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
     if (open) loadSettings();
   }, [open]);
 
-  // 面板所在窗口无边框且会因失焦隐藏，Esc 是用户预期的关闭方式
+  // 面板所在窗口无边框且会因失焦隐藏，Esc 是用户预期的关闭方式。
+  // 按层级逐级退出：录制 → 放弃确认 → 提示词编辑 → 关闭面板。
   useEffect(() => {
     if (!open) return;
     function onKeyDown(e: KeyboardEvent) {
       if (e.key !== "Escape" || e.defaultPrevented) return;
       e.stopPropagation();
+      if (recording) {
+        setRecording(false);
+        setShortcut(shortcutBeforeRecordRef.current);
+        return;
+      }
+      if (confirmDiscard) {
+        setConfirmDiscard(false);
+        return;
+      }
+      if (showPromptEditor) {
+        closePromptEditor();
+        return;
+      }
       attemptClose();
     }
     document.addEventListener("keydown", onKeyDown);
@@ -166,31 +215,34 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
       if (e.metaKey) parts.push("Super");
 
       const key = e.key;
-      if (!["Control", "Alt", "Shift", "Meta"].includes(key)) {
-        const keyName = toTauriKeyName(key);
-        if (keyName) {
-          parts.push(keyName);
-          if (parts.length > 1) {
-            setShortcut(parts.join("+"));
-            setRecording(false);
-          }
-        } else {
-          // 之前按无响应的键只会静默卡在录制态，这里给出原因
-          setNotice("该键无法作为快捷键，请使用字母、数字或功能键");
-        }
+      if (["Control", "Alt", "Shift", "Meta"].includes(key)) return;
+      const keyName = toTauriKeyName(key);
+      if (!keyName) {
+        // 之前按无响应的键只会静默卡在录制态，这里给出原因
+        setNotice("该键无法作为快捷键，请使用字母、数字或功能键");
+        return;
       }
+      // 功能键可以单独绑定；其他键必须带至少一个修饰键，否则极易和输入冲突
+      const standalone = /^F\d{1,2}$/.test(keyName);
+      if (parts.length === 0 && !standalone) {
+        setNotice("请至少按住一个修饰键（Ctrl / Alt / Shift / Win）");
+        return;
+      }
+      parts.push(keyName);
+      setShortcut(parts.join("+"));
+      setRecording(false);
     };
     document.addEventListener("keydown", handler, true);
     return () => document.removeEventListener("keydown", handler, true);
   }, [recording]);
 
-  function draftConfig(): AppConfig {
+  function draftConfig(prompts: CustomPrompt[] = customPrompts): AppConfig {
     return {
       provider,
       model,
       custom_model: customModel,
       theme,
-      custom_prompts: customPrompts,
+      custom_prompts: prompts,
       autostart,
       shortcut,
       window_x: baselineRef.current?.window_x ?? null,
@@ -200,12 +252,37 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
     };
   }
 
+  /** 除配置字段外，未保存的 Key 输入/删除与提示词草稿也算改动。 */
+  function hasDraftChanges(): boolean {
+    const baseline = baselineRef.current;
+    if (!baseline) return false;
+    if (isConfigDirty(baseline, draftConfig())) return true;
+    if (apiKeyInput.trim() || pendingKeyDelete) return true;
+    if (showPromptEditor && editingPrompt) {
+      return isPromptDirty(editingOriginal, editingPrompt);
+    }
+    return false;
+  }
+
+  function closePromptEditor() {
+    setShowPromptEditor(false);
+    setEditingPrompt(null);
+    setEditingOriginal(null);
+  }
+
   function attemptClose() {
+    // 保存过程中不要关闭面板，避免配置写了一半又被卸载
+    if (saving) return;
     if (recording) {
       setRecording(false);
       setShortcut(shortcutBeforeRecordRef.current);
     }
-    if (baselineRef.current && isDirty(baselineRef.current, draftConfig())) {
+    // 已在「放弃修改？」确认态时，再点遮罩或按 Esc 表示取消放弃，留在面板里
+    if (confirmDiscard) {
+      setConfirmDiscard(false);
+      return;
+    }
+    if (hasDraftChanges()) {
       setConfirmDiscard(true);
       return;
     }
@@ -213,47 +290,61 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
   }
 
   async function loadSettings() {
-    const config = (await invoke("get_config")) as AppConfig;
-    const autoEnabled = (await invoke("is_autostart_enabled")) as boolean;
-    const providerKnown = PROVIDERS.some((p) => p.id === config.provider);
-    const effectiveProvider = providerKnown ? config.provider : "deepseek";
-    const modelList = PROVIDERS.find((p) => p.id === effectiveProvider)?.models ?? [];
-    // 配置里可能残留别的供应商的模型名（手工编辑、或供应商列表变更）
-    const effectiveModel =
-      config.model === "custom" || modelList.includes(config.model)
-        ? config.model
-        : modelList[0];
-    const keySet = (await invoke("has_api_key", { provider: effectiveProvider }).catch(
-      () => false,
-    )) as boolean;
+    const seq = ++loadSeqRef.current;
+    setLoading(true);
+    try {
+      const config = (await invoke("get_config")) as AppConfig;
+      if (seq !== loadSeqRef.current) return;
+      const providerKnown = PROVIDERS.some((p) => p.id === config.provider);
+      const effectiveProvider = providerKnown ? config.provider : "deepseek";
+      const modelList = PROVIDERS.find((p) => p.id === effectiveProvider)?.models ?? [];
+      // 配置里可能残留别的供应商的模型名（手工编辑、或供应商列表变更）
+      const modelFallback = config.model !== "custom" && !modelList.includes(config.model);
+      const effectiveModel = modelFallback ? modelList[0] : config.model;
+      const [autoEnabled, keySet] = await Promise.all([
+        invoke<boolean>("is_autostart_enabled").catch(() => false),
+        invoke<boolean>("has_api_key", { provider: effectiveProvider }).catch(() => false),
+      ]);
+      if (seq !== loadSeqRef.current) return;
 
-    setProvider(effectiveProvider);
-    setModel(effectiveModel);
-    setCustomModel(config.custom_model);
-    setTheme(config.theme || "system");
-    setShortcut(config.shortcut || "Alt+Space");
-    setAutostart(autoEnabled);
-    setClipboardAutoRead(config.clipboard_auto_read !== false);
-    setAutoCheckUpdates(config.auto_check_updates !== false);
-    setCustomPrompts(config.custom_prompts || []);
-    setHasKey(keySet);
-    setApiKeyInput("");
-    setError(
-      providerKnown
-        ? ""
-        : `配置中的供应商「${config.provider}」不可用，已回退到 DeepSeek`,
-    );
-    setNotice("");
-    setRecording(false);
-    setConfirmDiscard(false);
-    setShowPromptEditor(false);
-    setEditingPrompt(null);
-    baselineRef.current = {
-      ...config,
-      provider: effectiveProvider,
-      model: effectiveModel,
-      autostart: autoEnabled,
-    };
+      setProvider(effectiveProvider);
+      setModel(effectiveModel);
+      setCustomModel(config.custom_model);
+      setTheme(config.theme || "system");
+      setShortcut(config.shortcut || "Alt+Space");
+      setAutostart(Boolean(autoEnabled));
+      setClipboardAutoRead(config.clipboard_auto_read !== false);
+      setAutoCheckUpdates(config.auto_check_updates !== false);
+      setCustomPrompts(config.custom_prompts || []);
+      setHasKey(Boolean(keySet));
+      setApiKeyInput("");
+      setPendingKeyDelete(null);
+      setError(
+        providerKnown
+          ? ""
+          : `配置中的供应商「${config.provider}」不可用，已回退到 DeepSeek`,
+      );
+      setNotice(
+        modelFallback
+          ? `模型「${config.model}」不在 ${effectiveProvider} 的列表里，已回退为 ${effectiveModel}`
+          : "",
+      );
+      setRecording(false);
+      setConfirmDiscard(false);
+      closePromptEditor();
+      baselineRef.current = {
+        ...config,
+        provider: effectiveProvider,
+        model: effectiveModel,
+        autostart: Boolean(autoEnabled),
+      };
+    } catch (e) {
+      if (seq === loadSeqRef.current) {
+        setError(`读取配置失败：${e instanceof Error ? e.message : String(e)}`);
+      }
+    } finally {
+      if (seq === loadSeqRef.current) setLoading(false);
+    }
   }
 
   async function handleSave() {
@@ -262,6 +353,26 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
     if (!baselineRef.current) {
       setError("配置尚未加载完成，请稍候再试");
       return;
+    }
+    if (loading) return;
+
+    // 编辑器里还开着的内容直接一起提交，避免点了「保存配置」却把草稿丢掉
+    let prompts = customPrompts;
+    if (showPromptEditor && editingPrompt) {
+      const normalized = normalizePrompt(editingPrompt);
+      if (!normalized.name || !normalized.system_prompt) {
+        setError("提示词编辑未完成：请填写名称和系统提示词，或先取消编辑");
+        return;
+      }
+      if (
+        customPrompts.some(
+          (p) => p.id !== normalized.id && p.name === normalized.name,
+        )
+      ) {
+        setError(`已存在同名标签页「${normalized.name}」，请换一个名称`);
+        return;
+      }
+      prompts = upsertPrompt(customPrompts, normalized);
     }
 
     setSaving(true);
@@ -275,19 +386,25 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
     }
 
     try {
-      // 顺序刻意安排成「失败时不会让配置与系统状态分叉」：
-      // Key 与快捷键、自启动先落到各自的位置，全部成功后才写 config.json。
       if (apiKeyInput.trim()) {
         await invoke("set_api_key", { provider, key: apiKeyInput.trim() });
         setHasKey(true);
+      } else if (pendingKeyDelete) {
+        await invoke("delete_api_key", { provider });
+        setHasKey(false);
       }
 
-      const status = (await invoke("shortcut_status")) as { active: string };
-      if (shortcut !== status.active) {
+      // 只有用户这次真的改过快捷键才去动全局注册：配置里的旧值与实际生效值
+      // 不一致（启动时被占用而回落）时，保存主题/模型之类的改动不该被它卡住。
+      const baseline = baselineRef.current;
+      if (!baseline || shortcut !== baseline.shortcut) {
         await invoke("change_shortcut", { new: shortcut });
       }
 
-      if (autostart !== (await invoke("is_autostart_enabled"))) {
+      const autoStarted = (await invoke<boolean>("is_autostart_enabled").catch(
+        () => false,
+      )) as boolean;
+      if (autostart !== autoStarted) {
         await invoke("set_autostart", { enable: autostart });
       }
 
@@ -295,7 +412,7 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
       const current = (await invoke("get_config")) as AppConfig;
       await invoke("save_config", {
         config: {
-          ...draftConfig(),
+          ...draftConfig(prompts),
           window_x: current.window_x,
           window_y: current.window_y,
         },
@@ -307,23 +424,27 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
       return;
     }
 
+    setCustomPrompts(prompts);
+    setApiKeyInput("");
+    setPendingKeyDelete(null);
+    closePromptEditor();
     setSaving(false);
     onConfigSaved();
     onClose();
   }
 
-  async function handleDeleteKey() {
-    try {
-      await invoke("delete_api_key", { provider });
-      setHasKey(false);
-      setApiKeyInput("");
-      setNotice("删除的 API Key 在点击「保存配置」后才会生效");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
+  function handleDeleteKey() {
+    // 只做标记，真正删除要等「保存配置」；关掉面板、点放弃都不会丢 Key
+    setPendingKeyDelete(provider);
+    setHasKey(false);
+    setApiKeyInput("");
+    setError("");
+    setNotice("已标记删除，保存配置后才会真正删除；直接关闭面板不会改动 Key");
   }
 
   function handleAddPrompt() {
+    if (showPromptEditor) return;
+    setEditingOriginal(null);
     setEditingPrompt({
       id: crypto.randomUUID(),
       name: "",
@@ -335,26 +456,24 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
   }
 
   function handleEditPrompt(p: CustomPrompt) {
+    setEditingOriginal({ ...p });
     setEditingPrompt({ ...p });
     setShowPromptEditor(true);
   }
 
   function handleSavePrompt() {
-    if (!editingPrompt || !editingPrompt.name.trim() || !editingPrompt.system_prompt.trim()) return;
-    const normalized = {
-      ...editingPrompt,
-      name: editingPrompt.name.trim(),
-      system_prompt: editingPrompt.system_prompt,
-      placeholder: editingPrompt.placeholder.trim(),
-    };
-    const exists = customPrompts.some((p) => p.id === normalized.id);
-    setCustomPrompts(
-      exists
-        ? customPrompts.map((p) => (p.id === normalized.id ? normalized : p))
-        : [...customPrompts, normalized],
-    );
-    setShowPromptEditor(false);
-    setEditingPrompt(null);
+    if (!editingPrompt) return;
+    const normalized = normalizePrompt(editingPrompt);
+    if (!normalized.name || !normalized.system_prompt) return;
+    if (
+      customPrompts.some((p) => p.id !== normalized.id && p.name === normalized.name)
+    ) {
+      setError(`已存在同名标签页「${normalized.name}」，请换一个名称`);
+      return;
+    }
+    setCustomPrompts(upsertPrompt(customPrompts, normalized));
+    setError("");
+    closePromptEditor();
   }
 
   function handleDeletePrompt(id: string) {
@@ -384,17 +503,27 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
       >
         <div className="flex shrink-0 items-center justify-between border-b px-4 py-2.5">
           <h2 className="text-sm font-semibold">设置</h2>
-          <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={attemptClose}>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 w-6 p-0"
+            aria-label="关闭设置"
+            onClick={attemptClose}
+          >
             <X className="size-3.5" />
           </Button>
         </div>
 
-        <div className="flex-1 space-y-4 overflow-y-auto p-4">
+        <div
+          className="flex-1 space-y-4 overflow-y-auto p-4"
+          aria-busy={loading || undefined}
+        >
           {/* Provider & Model */}
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="settings-provider" className="text-xs">供应商</Label>
             <Select
               value={provider}
+              items={PROVIDERS.map((p) => ({ value: p.id, label: p.name }))}
               onValueChange={(v) => {
                 if (!v) return;
                 setProvider(v);
@@ -405,8 +534,10 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
                 }
                 setApiKeyInput("");
                 setHasKey(false);
+                // 删除标记只对标记时的供应商有效，切换后即作废
+                setPendingKeyDelete(null);
                 // 每个供应商的 Key 单独存放，切过去时要把已有的查出来
-                void invoke("has_api_key", { provider: v })
+                void invoke<boolean>("has_api_key", { provider: v })
                   .then((set) => setProviderKeyState(v, Boolean(set)))
                   .catch(() => {});
               }}
@@ -431,6 +562,10 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
             <Label htmlFor="settings-model" className="text-xs">模型</Label>
             <Select
               value={modelList.includes(model) ? model : "custom"}
+              items={[
+                ...modelList.map((m) => ({ value: m, label: m })),
+                { value: "custom", label: "自定义..." },
+              ]}
               onValueChange={(v) => {
                 if (!v) return;
                 setModel(v);
@@ -470,7 +605,11 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
                   type={showKey ? "text" : "password"}
                   placeholder={hasKey ? "已配置，输入新 Key 覆盖" : "输入 API Key"}
                   value={apiKeyInput}
-                  onChange={(e) => setApiKeyInput(e.target.value)}
+                  onChange={(e) => {
+                    setApiKeyInput(e.target.value);
+                    // 输入新 Key 即视为撤销刚才的删除标记
+                    if (e.target.value.trim()) setPendingKeyDelete(null);
+                  }}
                   autoComplete="off"
                   spellCheck={false}
                   className="h-8 pl-7 pr-7 text-xs"
@@ -485,20 +624,49 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
                 </button>
               </div>
               {hasKey && !apiKeyInput && (
-                <Button size="sm" variant="ghost" className="h-8 w-8 p-0 shrink-0" onClick={handleDeleteKey}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 w-8 p-0 shrink-0"
+                  aria-label="删除 API Key"
+                  title="删除 API Key（保存配置后生效）"
+                  onClick={handleDeleteKey}
+                >
                   <Trash2 className="size-3.5 text-destructive" />
                 </Button>
               )}
             </div>
-            {hasKey && !apiKeyInput && (
+            {hasKey && !apiKeyInput && !pendingKeyDelete && (
               <span className="text-[10px] text-green-600">已安全存储在系统凭据管理器</span>
+            )}
+            {pendingKeyDelete === provider && (
+              <div className="flex items-center gap-2 text-[10px] text-destructive">
+                <span className="flex-1">已标记删除该供应商的 API Key，保存后生效</span>
+                <button
+                  type="button"
+                  className="shrink-0 underline underline-offset-2 hover:opacity-80"
+                  onClick={() => {
+                    void invoke<boolean>("has_api_key", { provider })
+                      .then((set) => setHasKey(Boolean(set)))
+                      .catch(() => {});
+                    setPendingKeyDelete(null);
+                    setNotice("");
+                  }}
+                >
+                  撤销
+                </button>
+              </div>
             )}
           </div>
 
           {/* Theme */}
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="settings-theme" className="text-xs">主题</Label>
-            <Select value={theme} onValueChange={(v) => v && setTheme(v)}>
+            <Select
+              value={theme}
+              items={THEMES.map((t) => ({ value: t.id, label: t.name }))}
+              onValueChange={(v) => v && setTheme(v)}
+            >
               <SelectTrigger id="settings-theme" className="h-8 w-full text-xs">
                 <SelectValue />
               </SelectTrigger>
@@ -517,8 +685,10 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
             <Label className="text-xs">唤起快捷键</Label>
             <div
               ref={recordRef}
+              role="button"
               tabIndex={0}
-              className={`flex h-8 items-center rounded-md border px-2.5 text-xs transition-colors outline-none ${
+              aria-label="录制新的唤起快捷键"
+              className={`flex h-8 items-center rounded-md border px-2.5 text-xs transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/50 ${
                 recording ? "border-primary bg-primary/5" : "bg-background"
               }`}
               onClick={() => {
@@ -526,6 +696,15 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
                 shortcutBeforeRecordRef.current = shortcut;
                 setNotice("");
                 setRecording(true);
+              }}
+              onKeyDown={(e) => {
+                if (recording) return;
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  shortcutBeforeRecordRef.current = shortcut;
+                  setNotice("");
+                  setRecording(true);
+                }
               }}
             >
               <KeyRound className="mr-1.5 size-3 shrink-0 text-muted-foreground" />
@@ -549,7 +728,7 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
               )}
             </div>
             <span className="text-[10px] text-muted-foreground">
-              点击输入框，按下组合键（需包含字母/数字/功能键，如 Ctrl+Shift+T）。
+              点击或按 Enter 开始录制，按下组合键完成（如 Ctrl+Shift+T），F1–F12 可单独使用。
               新组合注册成功后才会替换旧组合，旧组合在此之前仍然有效。
             </span>
           </div>
@@ -598,7 +777,14 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
           <div className="flex flex-col gap-1.5">
             <div className="flex items-center justify-between">
               <Label className="text-xs">自定义提示词</Label>
-              <Button size="sm" variant="ghost" className="h-6 gap-1 px-1.5" onClick={handleAddPrompt}>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 gap-1 px-1.5"
+                onClick={handleAddPrompt}
+                disabled={showPromptEditor}
+                title={showPromptEditor ? "请先保存或取消当前编辑" : "添加自定义提示词"}
+              >
                 <Plus className="size-3" />
                 添加
               </Button>
@@ -621,6 +807,7 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
                     size="sm"
                     variant="ghost"
                     className="h-5 w-5 p-0"
+                    aria-label={`编辑提示词 ${p.name}`}
                     onClick={() => handleEditPrompt(p)}
                   >
                     <Pencil className="size-3" />
@@ -629,6 +816,7 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
                     size="sm"
                     variant="ghost"
                     className="h-5 w-5 p-0"
+                    aria-label={`删除提示词 ${p.name}`}
                     onClick={() => handleDeletePrompt(p.id)}
                   >
                     <Trash2 className="size-3 text-destructive" />
@@ -653,7 +841,7 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
                   onChange={(e) =>
                     setEditingPrompt({ ...editingPrompt, system_prompt: e.target.value })
                   }
-                  className="min-h-16 text-xs"
+                  className="max-h-40 min-h-16 overflow-y-auto text-xs"
                 />
                 <div className="space-y-1 text-[10px] leading-relaxed text-muted-foreground">
                   <p>
@@ -684,6 +872,7 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
                   </Label>
                   <Select
                     value={editingPrompt.thinking ?? "auto"}
+                    items={THINKING_OPTIONS}
                     onValueChange={(v) =>
                       v && setEditingPrompt({ ...editingPrompt, thinking: v as ThinkingMode })
                     }
@@ -713,10 +902,7 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
                     size="sm"
                     variant="ghost"
                     className="h-6 text-xs"
-                    onClick={() => {
-                      setShowPromptEditor(false);
-                      setEditingPrompt(null);
-                    }}
+                    onClick={closePromptEditor}
                   >
                     取消
                   </Button>
@@ -735,10 +921,21 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
           </div>
 
           <UpdateSection autoCheck={hasUpdate} />
-
-          {notice && !error && <p className="text-xs text-muted-foreground">{notice}</p>}
-          {error && <p className="text-xs break-words text-destructive">{error}</p>}
         </div>
+
+        {/* 错误/提示固定在滚动区之外：此前它们排在最底部，用户点了保存
+            失败后常常根本看不到原因 */}
+        {(error || notice) && (
+          <div className="shrink-0 border-t px-4 py-2">
+            {error ? (
+              <p role="alert" className="text-xs break-words text-destructive">
+                {error}
+              </p>
+            ) : (
+              <p className="text-xs break-words text-muted-foreground">{notice}</p>
+            )}
+          </div>
+        )}
 
         <div className="shrink-0 border-t px-4 py-2.5">
           {confirmDiscard ? (
@@ -756,16 +953,28 @@ export function SettingsPanel({ open, onClose, onConfigSaved, hasUpdate }: Setti
               </Button>
               <Button
                 size="sm"
-                variant="destructive"
-                className="h-7 text-xs"
+                variant="ghost"
+                className="h-7 text-xs text-destructive"
                 onClick={onClose}
               >
                 放弃
               </Button>
+              <Button
+                size="sm"
+                className="h-7 text-xs"
+                onClick={handleSave}
+                disabled={saving || loading}
+              >
+                保存
+              </Button>
             </div>
           ) : (
-            <Button className="w-full h-8 text-xs" onClick={handleSave} disabled={saving}>
-              {saving ? "保存中..." : "保存配置"}
+            <Button
+              className="w-full h-8 text-xs"
+              onClick={handleSave}
+              disabled={saving || loading}
+            >
+              {loading ? "加载配置中..." : saving ? "保存中..." : "保存配置"}
             </Button>
           )}
         </div>

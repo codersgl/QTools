@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
@@ -68,18 +70,45 @@ pub fn load_config() -> AppConfig {
         return AppConfig::default();
     };
     let path = dir.join("config.json");
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return AppConfig::default();
+    };
+    match serde_json::from_str::<AppConfig>(&raw) {
+        Ok(config) => config,
+        Err(e) => {
+            // 损坏的配置不能静默丢掉：改名备份一份，用户/支持人员还能救回
+            // 自定义提示词；本次启动用默认值，避免整个应用起不来。
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let backup = dir.join(format!("config.json.corrupt-{stamp}"));
+            let _ = fs::rename(&path, &backup);
+            eprintln!(
+                "配置解析失败（{e}），已备份到 {}，本次使用默认配置",
+                backup.display()
+            );
+            AppConfig::default()
+        }
+    }
 }
 
 fn write_config(dir: &PathBuf, config: &AppConfig) -> Result<(), String> {
     let path = dir.join("config.json");
     let tmp = dir.join("config.json.tmp");
     let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
-    fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    // 先落盘刷盘再 rename：掉电时宁可不更新，也不留下 0 字节的 config.json
+    {
+        let mut file = fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+    }
+    fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    // 目录项也同步一次；个别平台不支持对目录 sync，失败不影响写入结果
+    if let Ok(dir_handle) = fs::File::open(dir) {
+        let _ = dir_handle.sync_all();
+    }
+    Ok(())
 }
 
 /// 读取磁盘上的既有配置；读不到或解析失败一律返回 None。
@@ -98,16 +127,26 @@ pub fn save_config(config: &AppConfig) -> Result<(), String> {
     write_config(&dir, config)
 }
 
-/// 窗口失焦时记录位置。既有配置不可用时直接跳过，不写默认值。
+/// 窗口失焦时记录位置。首次运行还没有配置文件时以默认配置为底创建一份，
+/// 否则「记住窗口位置」要等到用户先在设置里保存一次才开始生效。
+/// 文件存在但解析失败时放弃写入，绝不拿默认值覆盖用户配置。
 pub fn save_window_position(x: i32, y: i32) {
     let _guard = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let Some(dir) = config_dir() else { return };
-    let Some(mut config) = read_existing_config(&dir) else { return };
+    let path = dir.join("config.json");
+    let mut config = match read_existing_config(&dir) {
+        Some(config) => config,
+        None if !path.exists() => AppConfig::default(),
+        None => return,
+    };
     if config.window_x == Some(x) && config.window_y == Some(y) {
         return;
     }
     config.window_x = Some(x);
     config.window_y = Some(y);
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
     let _ = write_config(&dir, &config);
 }
 

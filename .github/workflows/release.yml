@@ -83,6 +83,10 @@ jobs:
 
             构建未经代码签名：macOS 首次打开需右键 →「打开」绕过 Gatekeeper；
             Windows SmartScreen 会提示「未知发布者」。
+
+            > 升级提示：0.1.0 / 0.1.1 在存在自定义提示词时会启动卡死，设置面板与
+            > 应用内更新都打不开。若你正处于这种情况，请直接下载本页安装包覆盖安装；
+            > 其余旧版本可以在应用内「检查更新」正常升级。
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           args: ${{ matrix.args }}

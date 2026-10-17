@@ -20,6 +20,73 @@ static ACTIVE_SHORTCUT: Mutex<String> = Mutex::new(String::new());
 /// 快捷键注册失败的错误信息，前端拉取后提示用户。
 static SHORTCUT_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
+/// 单实例互斥量（Windows 命名互斥体）。第二个实例启动时唤起已有窗口后退出，
+/// 避免出现两个托盘图标、两套全局快捷键以及彼此覆盖配置写入。
+#[cfg(target_os = "windows")]
+mod single_instance {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateMutexW(
+            attrs: *mut core::ffi::c_void,
+            initial_owner: i32,
+            name: *const u16,
+        ) -> *mut core::ffi::c_void;
+        fn GetLastError() -> u32;
+        fn SetLastError(code: u32);
+        fn FindWindowW(class_name: *const u16, window_name: *const u16) -> *mut core::ffi::c_void;
+        fn ShowWindow(hwnd: *mut core::ffi::c_void, cmd: i32) -> i32;
+        fn SetForegroundWindow(hwnd: *mut core::ffi::c_void) -> i32;
+    }
+
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+    const SW_SHOW: i32 = 5;
+
+    fn wide(value: &str) -> Vec<u16> {
+        std::ffi::OsStr::new(value)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    /// 返回 true 表示已经有一个实例在运行。互斥体句柄故意泄漏，
+    /// 让它随进程一起消失，否则句柄一关第二个实例就检测不到了。
+    pub fn already_running() -> bool {
+        let name = wide(r"Local\qtools-single-instance");
+        // CreateMutexW 只会在互斥体已存在时把 last error 置成 183，
+        // 新建时则保留旧值；先清零才能正确判断。
+        unsafe { SetLastError(0) };
+        let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr()) };
+        if handle.is_null() {
+            // 创建失败时不要拒绝启动，宁可多开也不要打不开
+            return false;
+        }
+        unsafe { GetLastError() == ERROR_ALREADY_EXISTS }
+    }
+
+    /// 把已有实例的主窗口显示出来并置前。
+    pub fn focus_existing() {
+        let title = wide("qtools");
+        let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+        if hwnd.is_null() {
+            return;
+        }
+        unsafe {
+            ShowWindow(hwnd, SW_SHOW);
+            SetForegroundWindow(hwnd);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod single_instance {
+    pub fn already_running() -> bool {
+        false
+    }
+    pub fn focus_existing() {}
+}
+
 fn active_shortcut() -> String {
     ACTIVE_SHORTCUT
         .lock()
@@ -271,6 +338,13 @@ fn register_shortcut(app: &tauri::AppHandle, shortcut: &str) -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 第二个实例只负责把已有窗口唤到前台，然后自己退出：
+    // 两个实例会各注册一套快捷键、各写一份 config.json，且托盘会重复。
+    if single_instance::already_running() {
+        single_instance::focus_existing();
+        return;
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -304,6 +378,9 @@ pub fn run() {
                     .icon(icon.clone())
                     .tooltip("QTools")
                     .menu(&menu)
+                    // Tauri 2 默认左键也弹菜单；这里按 README 的约定改成
+                    // 左键切换窗口、右键才出菜单，避免菜单抢焦点造成闪烁
+                    .show_menu_on_left_click(false)
                     .on_menu_event(|app, event| match event.id().as_ref() {
                         "show" => show_main_window(app),
                         "quit" => {
@@ -360,7 +437,23 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::Focused(false) = event {
-                if IS_DRAGGING.load(Ordering::SeqCst) {
+                if IS_DRAGGING.swap(false, Ordering::SeqCst) {
+                    // 拖拽结束时窗口位置也变了，这里一并记住
+                    if let Ok(pos) = window.outer_position() {
+                        config::save_window_position(pos.x, pos.y);
+                    }
+                    // Windows 原生拖拽走模态循环，mouseup 不一定回到 WebView，
+                    // 标志位可能残留成 true。这里给 250ms 宽限：拖拽结束后若仍是
+                    // 失焦状态就补一次隐藏，避免置顶窗口点别的程序也不收起。
+                    let app = window.app_handle().clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        if let Some(w) = app.get_webview_window("main") {
+                            if !w.is_focused().unwrap_or(false) {
+                                let _ = w.hide();
+                            }
+                        }
+                    });
                     return;
                 }
                 if let Ok(pos) = window.outer_position() {

@@ -4,7 +4,9 @@ export interface TemplateVariable {
 }
 
 function tokenRegex(): RegExp {
-  return /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*:\s*([^}]*?))?\s*\}\}/g;
+  // 变量名支持中文等 Unicode 字母：文档与设置里写作 `{{变量名}}`，
+  // 只认 ASCII 会让用户照抄示例后变量被原样发给模型。
+  return /\{\{\s*([\p{L}_][\p{L}\p{N}_]*)(?:\s*:\s*([^}]*?))?\s*\}\}/gu;
 }
 
 /** `input` 是保留名：带不带 `:选项` 后缀都代表同一个用户输入插槽。 */

@@ -15,11 +15,11 @@ interface MarkdownOutputProps {
 export function MarkdownOutput({ content, streaming = false }: MarkdownOutputProps) {
   const [notice, setNotice] = useState("");
 
-  async function handleClick(event: React.MouseEvent<HTMLDivElement>) {
+  async function handleActivation(event: React.MouseEvent<HTMLDivElement>) {
     const anchor = (event.target as HTMLElement).closest("a");
     if (!anchor) return;
     // 窗口没有地址栏也没有返回入口，一旦被模型输出的链接导航走就只能杀进程恢复，
-    // 所以任何跳转都必须拦下来交给系统浏览器。
+    // 所以任何跳转（左键、中键、Ctrl+点击）都必须拦下来交给系统浏览器。
     event.preventDefault();
     const href = anchor.getAttribute("href") ?? "";
     try {
@@ -31,18 +31,28 @@ export function MarkdownOutput({ content, streaming = false }: MarkdownOutputPro
   }
 
   return (
-    <div
-      className="md-body rounded-lg bg-muted/50 p-3 text-sm leading-relaxed"
-      onClickCapture={handleClick}
-    >
-      {streaming ? (
-        <pre className="font-sans whitespace-pre-wrap break-words">{content}</pre>
-      ) : (
-        <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
-          {content}
-        </ReactMarkdown>
+    <div className="flex flex-col gap-1">
+      {notice && (
+        <p role="alert" className="text-xs text-destructive">
+          {notice}
+        </p>
       )}
-      {notice && <p className="mt-1 text-xs text-destructive">{notice}</p>}
+      <div
+        className="md-body rounded-lg bg-muted/50 p-3 text-sm leading-relaxed"
+        onClickCapture={handleActivation}
+        onAuxClickCapture={handleActivation}
+      >
+        {streaming ? (
+          <pre className="font-sans whitespace-pre-wrap break-words">
+            {content}
+            <span className="md-caret" aria-hidden />
+          </pre>
+        ) : (
+          <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
+            {content}
+          </ReactMarkdown>
+        )}
+      </div>
     </div>
   );
 }

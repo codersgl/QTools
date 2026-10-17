@@ -1,4 +1,14 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+  type RefObject,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { check } from "@tauri-apps/plugin-updater";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -43,6 +53,7 @@ import {
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { missingTemplateVars, parseTemplateVariables } from "@/lib/template";
 import { copyText } from "@/lib/clipboard";
+import { cn } from "@/lib/utils";
 import {
   DEFAULT_CONFIG,
   THINKING_OPTIONS,
@@ -76,8 +87,12 @@ function ThinkingSelect({
 }) {
   if (!supportsThinking(providerId)) return null;
   return (
-    <Select value={value} onValueChange={(v) => v && onChange(v as ThinkingMode)}>
-      <SelectTrigger className="h-7 w-auto min-w-24 gap-1 text-xs">
+    <Select
+      value={value}
+      onValueChange={(v) => v && onChange(v as ThinkingMode)}
+      items={THINKING_OPTIONS}
+    >
+      <SelectTrigger className="h-7 gap-1 text-xs" aria-label="思考档位">
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
@@ -116,10 +131,11 @@ function useCopyFeedback() {
 
   async function copy(text: string) {
     if (!text) return;
+    // 每次尝试前清掉上一次的错误，否则一次失败会让错误行一直挂在那里
+    setError("");
     try {
       await copyText(text);
       setCopied(true);
-      setError("");
       clearTimeout(timerRef.current);
       timerRef.current = setTimeout(() => setCopied(false), 1500);
     } catch (e) {
@@ -277,6 +293,69 @@ interface PanelProps {
   clipboardText: string;
   /** 每次窗口隐藏自增，用于清掉自动填入且未被编辑的剪贴板内容。 */
   wipeToken: number;
+  /** 当前标签页是否处于选中状态：只有选中的面板才响应自动聚焦。 */
+  active: boolean;
+  /** 窗口重新获得焦点 / 切换标签页时自增，用于把光标送回输入框。 */
+  focusToken: number;
+}
+
+/**
+ * 唤起窗口后直接聚焦当前输入框：这是个键盘优先的浮窗，Alt+Space 之后
+ * 若还要先点一下输入框才能打字，等于每次都多一步。
+ */
+function useFocusInput(active: boolean, focusToken: number) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const lastTokenRef = useRef(focusToken);
+
+  useEffect(() => {
+    // 只在唤起/关闭设置这类「显式要求聚焦」的时机动作；单纯切标签不至于把
+    // 焦点从标签栏抢走，键盘用户仍可用方向键继续切换。
+    if (!active) {
+      lastTokenRef.current = focusToken;
+      return;
+    }
+    if (focusToken === lastTokenRef.current || focusToken === 0) return;
+    lastTokenRef.current = focusToken;
+    if (!document.hasFocus()) return;
+    // 等一帧，让刚刚切换出来的标签面板完成可见性变更后再聚焦
+    const frame = requestAnimationFrame(() => {
+      if (document.hasFocus()) ref.current?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [active, focusToken]);
+
+  return ref;
+}
+
+/**
+ * 输入框 + 右下角快捷键提示。窗口只有 480×400，把提示塞进输入框内部，
+ * 工具栏就能把有限宽度留给真正要点的按钮，不再横向溢出。
+ */
+function InputWithHint({
+  hint,
+  className,
+  textareaRef,
+  value,
+  ...props
+}: ComponentProps<"textarea"> & {
+  hint: string;
+  textareaRef: RefObject<HTMLTextAreaElement | null>;
+}) {
+  return (
+    <div className="relative">
+      <Textarea
+        ref={textareaRef}
+        value={value}
+        className={cn("max-h-32 overflow-y-auto pb-6", className)}
+        {...props}
+      />
+      {!value && (
+        <span className="pointer-events-none absolute right-2.5 bottom-1.5 text-[10px] text-muted-foreground/70">
+          {hint}
+        </span>
+      )}
+    </div>
+  );
 }
 
 function useClipboardFill(clipboardText: string, wipeToken: number) {
@@ -315,7 +394,14 @@ function useClipboardFill(clipboardText: string, wipeToken: number) {
   return { input, changeInput, clearInput };
 }
 
-function TranslatePanel({ config, getApiKey, clipboardText, wipeToken }: PanelProps) {
+function TranslatePanel({
+  config,
+  getApiKey,
+  clipboardText,
+  wipeToken,
+  active,
+  focusToken,
+}: PanelProps) {
   const { input, changeInput, clearInput } = useClipboardFill(clipboardText, wipeToken);
   const stream = useStreamOutput();
   const [direction, setDirection] = useState<TranslateDirection>("auto");
@@ -324,6 +410,7 @@ function TranslatePanel({ config, getApiKey, clipboardText, wipeToken }: PanelPr
   const { loading, error, setError, begin, finish, stop } = useRunGuard();
   const copy = useCopyFeedback();
   const elapsed = useElapsed(loading);
+  const textareaRef = useFocusInput(active, focusToken);
 
   const resolved = input.trim() ? resolveTranslateDirection(input, direction) : null;
 
@@ -360,7 +447,9 @@ function TranslatePanel({ config, getApiKey, clipboardText, wipeToken }: PanelPr
 
   return (
     <div className="flex flex-col gap-3">
-      <Textarea
+      <InputWithHint
+        textareaRef={textareaRef}
+        hint="Ctrl+Enter 翻译"
         placeholder="输入要翻译的文本..."
         value={input}
         onChange={(e) => changeInput(e.target.value)}
@@ -372,7 +461,7 @@ function TranslatePanel({ config, getApiKey, clipboardText, wipeToken }: PanelPr
           }
         }}
       />
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         {loading ? (
           <Button size="sm" variant="destructive" onClick={stop}>
             <Square className="size-3.5" />
@@ -387,8 +476,12 @@ function TranslatePanel({ config, getApiKey, clipboardText, wipeToken }: PanelPr
         <Select
           value={direction}
           onValueChange={(v) => v && setDirection(v as TranslateDirection)}
+          items={DIRECTION_OPTIONS}
         >
-          <SelectTrigger className="h-7 w-auto min-w-24 gap-1 text-xs">
+          <SelectTrigger
+            className="h-7 gap-1 text-xs"
+            aria-label="翻译方向"
+          >
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -410,18 +503,27 @@ function TranslatePanel({ config, getApiKey, clipboardText, wipeToken }: PanelPr
           onChange={setThinking}
         />
         {stream.output && (
-          <Button size="sm" variant="ghost" onClick={() => copy.copy(stream.output)}>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="ml-auto"
+            onClick={() => copy.copy(stream.output)}
+          >
             {copy.copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
             {copy.copied ? "已复制" : "复制"}
           </Button>
         )}
         {(input || stream.output || stream.thinking) && (
-          <Button size="sm" variant="ghost" onClick={handleClear}>
+          <Button
+            size="sm"
+            variant="ghost"
+            className={stream.output ? undefined : "ml-auto"}
+            onClick={handleClear}
+          >
             <RotateCcw className="size-3.5" />
             清空
           </Button>
         )}
-        <span className="ml-auto text-xs text-muted-foreground">Ctrl+Enter 翻译</span>
       </div>
       <ErrorLine message={error || copy.error} />
       {loading && !stream.output && !stream.thinking && (
@@ -440,12 +542,20 @@ function TranslatePanel({ config, getApiKey, clipboardText, wipeToken }: PanelPr
   );
 }
 
-function NamingPanel({ config, getApiKey, clipboardText, wipeToken }: PanelProps) {
+function NamingPanel({
+  config,
+  getApiKey,
+  clipboardText,
+  wipeToken,
+  active,
+  focusToken,
+}: PanelProps) {
   const { input, changeInput, clearInput } = useClipboardFill(clipboardText, wipeToken);
   const [results, setResults] = useState<NamingResult[]>([]);
   const [copiedStyle, setCopiedStyle] = useState<string | null>(null);
   const { loading, error, setError, begin, finish, stop } = useRunGuard();
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const textareaRef = useFocusInput(active, focusToken);
 
   useEffect(() => () => clearTimeout(timerRef.current), []);
 
@@ -502,7 +612,9 @@ function NamingPanel({ config, getApiKey, clipboardText, wipeToken }: PanelProps
 
   return (
     <div className="flex flex-col gap-3">
-      <Textarea
+      <InputWithHint
+        textareaRef={textareaRef}
+        hint="Ctrl+Enter 生成"
         placeholder="输入中文含义或英文描述，如：用户登录..."
         value={input}
         onChange={(e) => changeInput(e.target.value)}
@@ -514,7 +626,7 @@ function NamingPanel({ config, getApiKey, clipboardText, wipeToken }: PanelProps
           }
         }}
       />
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         {loading ? (
           <Button size="sm" variant="destructive" onClick={stop}>
             <Square className="size-3.5" />
@@ -537,12 +649,16 @@ function NamingPanel({ config, getApiKey, clipboardText, wipeToken }: PanelProps
           </Button>
         )}
         {(input || results.length > 0) && (
-          <Button size="sm" variant="ghost" onClick={handleClear}>
+          <Button
+            size="sm"
+            variant="ghost"
+            className={results.length > 0 ? undefined : "ml-auto"}
+            onClick={handleClear}
+          >
             <RotateCcw className="size-3.5" />
             清空
           </Button>
         )}
-        <span className="ml-auto text-xs text-muted-foreground">Ctrl+Enter 生成</span>
       </div>
       <ErrorLine message={error} />
       {results.length > 0 && (
@@ -552,6 +668,8 @@ function NamingPanel({ config, getApiKey, clipboardText, wipeToken }: PanelProps
             {results.map((r) => (
               <button
                 key={r.style}
+                type="button"
+                aria-label={`复制 ${r.style} 命名：${r.name}`}
                 className="group flex items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition-colors hover:bg-muted/70"
                 onClick={() => handleCopy(r)}
               >
@@ -559,7 +677,14 @@ function NamingPanel({ config, getApiKey, clipboardText, wipeToken }: PanelProps
                   {r.style}
                 </Badge>
                 <code className="flex-1 text-sm font-mono break-all">{r.name}</code>
-                <span className="text-xs text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100">
+                <span
+                  className={cn(
+                    "text-xs text-muted-foreground transition-opacity",
+                    copiedStyle === r.style
+                      ? "opacity-100"
+                      : "opacity-0 group-hover:opacity-100",
+                  )}
+                >
                   {copiedStyle === r.style ? (
                     <Check className="size-3.5 text-green-500" />
                   ) : (
@@ -581,12 +706,15 @@ function CustomPromptPanel({
   prompt,
   clipboardText,
   wipeToken,
+  active,
+  focusToken,
 }: PanelProps & { prompt: CustomPrompt }) {
   const { input, changeInput, clearInput } = useClipboardFill(clipboardText, wipeToken);
   const stream = useStreamOutput();
   const { loading, error, setError, begin, finish, stop } = useRunGuard();
   const copy = useCopyFeedback();
   const elapsed = useElapsed(loading);
+  const textareaRef = useFocusInput(active, focusToken);
   // 默认取这个提示词自己保存的档位；没有该字段的历史配置按模型默认处理
   const [thinking, setThinking] = useState<ThinkingMode>(prompt.thinking ?? "auto");
 
@@ -594,16 +722,26 @@ function CustomPromptPanel({
     setThinking(prompt.thinking ?? "auto");
   }, [prompt.id, prompt.thinking]);
 
-  const templateVars = parseTemplateVariables(prompt.system_prompt);
+  // 必须缓存：每次渲染都返回新数组会让下面的 effect 每帧重跑，
+  // 而 effect 里又 setState，等价于无限重渲染（窗口直接卡死）。
+  const templateVars = useMemo(
+    () => parseTemplateVariables(prompt.system_prompt),
+    [prompt.system_prompt],
+  );
   const [varValues, setVarValues] = useState<Record<string, string>>({});
 
   useEffect(() => {
     setVarValues((prev) => {
+      let changed = false;
       const next: Record<string, string> = { ...prev };
       for (const v of templateVars) {
-        if (!(v.name in next)) next[v.name] = v.options[0] ?? "";
+        if (!(v.name in next)) {
+          next[v.name] = v.options[0] ?? "";
+          changed = true;
+        }
       }
-      return next;
+      // 没有新增变量时返回原对象，避免这次 effect 再触发一轮渲染
+      return changed ? next : prev;
     });
   }, [templateVars]);
 
@@ -660,6 +798,7 @@ function CustomPromptPanel({
                 <Select
                   value={varValues[v.name] ?? v.options[0]}
                   onValueChange={(val) => val && setVar(v.name, val)}
+                  items={v.options.map((o) => ({ value: o, label: o }))}
                 >
                   <SelectTrigger className="h-7 w-auto min-w-20 gap-1 text-xs">
                     <SelectValue />
@@ -684,7 +823,9 @@ function CustomPromptPanel({
           ))}
         </div>
       )}
-      <Textarea
+      <InputWithHint
+        textareaRef={textareaRef}
+        hint="Ctrl+Enter 执行"
         placeholder={prompt.placeholder || "输入内容..."}
         value={input}
         onChange={(e) => changeInput(e.target.value)}
@@ -696,7 +837,7 @@ function CustomPromptPanel({
           }
         }}
       />
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         {loading ? (
           <Button size="sm" variant="destructive" onClick={stop}>
             <Square className="size-3.5" />
@@ -714,18 +855,27 @@ function CustomPromptPanel({
           onChange={setThinking}
         />
         {stream.output && (
-          <Button size="sm" variant="ghost" onClick={() => copy.copy(stream.output)}>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="ml-auto"
+            onClick={() => copy.copy(stream.output)}
+          >
             {copy.copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
             {copy.copied ? "已复制" : "复制"}
           </Button>
         )}
         {(input || stream.output || stream.thinking) && (
-          <Button size="sm" variant="ghost" onClick={handleClear}>
+          <Button
+            size="sm"
+            variant="ghost"
+            className={stream.output ? undefined : "ml-auto"}
+            onClick={handleClear}
+          >
             <RotateCcw className="size-3.5" />
             清空
           </Button>
         )}
-        <span className="ml-auto text-xs text-muted-foreground">Ctrl+Enter 执行</span>
       </div>
       <ErrorLine message={error || copy.error} />
       {loading && !stream.output && !stream.thinking && (
@@ -753,12 +903,31 @@ function App() {
   const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
   const [hasKey, setHasKey] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [activeTab, setActiveTab] = useState("translate");
   const [clipboardText, setClipboardText] = useState("");
   const [wipeToken, setWipeToken] = useState(0);
+  /** 窗口重新获得焦点 / 关闭设置 / 切换标签页时自增，通知当前面板聚焦输入框。 */
+  const [focusToken, setFocusToken] = useState(0);
   const [shortcutHint, setShortcutHint] = useState("");
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const [hasUpdate, setHasUpdate] = useState(false);
   const clipboardAutoReadRef = useRef(true);
+
+  const tabValues = useMemo(
+    () => ["translate", "naming", ...config.custom_prompts.map((p) => p.id)],
+    [config.custom_prompts],
+  );
+
+  // 在设置里删掉当前打开的自定义提示词后，Tabs 的选中值会指向一个已经不存在的
+  // 面板，界面上就只剩一片空白。这里统一回退到「翻译」。
+  useEffect(() => {
+    if (!tabValues.includes(activeTab)) setActiveTab("translate");
+  }, [activeTab, tabValues]);
+
+  const closeSettings = useCallback(() => {
+    setShowSettings(false);
+    setFocusToken((n) => n + 1);
+  }, []);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -811,15 +980,19 @@ function App() {
 
     appWindow
       .onFocusChanged(({ payload: focused }) => {
-        if (focused && clipboardAutoReadRef.current) {
-          invoke("get_clipboard_text")
-            .then((text) => {
-              if (typeof text === "string" && text.trim()) setClipboardText(text);
-            })
-            .catch(() => {
-              // 剪贴板里是图片/文件时原生读取会失败，这里静默跳过
-            });
-        } else if (!focused) {
+        if (focused) {
+          // 窗口被唤起 / 重新激活：把光标送回当前面板的输入框
+          setFocusToken((n) => n + 1);
+          if (clipboardAutoReadRef.current) {
+            invoke("get_clipboard_text")
+              .then((text) => {
+                if (typeof text === "string" && text.trim()) setClipboardText(text);
+              })
+              .catch(() => {
+                // 剪贴板里是图片/文件时原生读取会失败，这里静默跳过
+              });
+          }
+        } else {
           // 失焦即隐藏：把没被编辑过的剪贴板内容从内存里抹掉
           setClipboardText("");
           setWipeToken((n) => n + 1);
@@ -857,6 +1030,25 @@ function App() {
     return () => mq.removeEventListener("change", onChange);
   }, [config.theme]);
 
+  // Esc 收起浮窗：置顶小窗最自然的「退出」手势。设置面板打开时由面板自己处理。
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== "Escape" || e.defaultPrevented || showSettings) return;
+      const target = e.target as HTMLElement | null;
+      // 下拉框/菜单正在用 Esc 关闭自己，别顺手把整个窗口也收起来
+      if (
+        target?.closest('[data-slot="select-content"], [role="listbox"], [role="menu"]') ||
+        document.querySelector('[data-slot="select-content"]')
+      ) {
+        return;
+      }
+      e.preventDefault();
+      void getCurrentWindow().hide();
+    }
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [showSettings]);
+
   async function getApiKey(): Promise<string> {
     const key = (await invoke("get_api_key", { provider: config.provider })) as
       | string
@@ -867,46 +1059,54 @@ function App() {
 
   return (
     <div className="relative flex h-screen flex-col bg-background p-4">
+      {/* 设置打开时把背景设为 inert：焦点与 Tab 顺序都留在浮层里，避免
+          键盘用户在看不见的控件上输入 */}
       <div
-        data-tauri-drag-region
-        className="mb-2 flex items-center gap-2 select-none cursor-move"
-        onMouseDown={(e) => {
-          if (e.buttons === 1 && !(e.target as HTMLElement).closest("button")) {
-            void invoke("set_dragging", { dragging: true }).catch(() => {});
-          }
-        }}
+        className="flex min-h-0 flex-1 flex-col"
+        inert={showSettings || undefined}
+        aria-hidden={showSettings || undefined}
       >
-        <GripHorizontal className="size-3.5 text-muted-foreground" />
-        <span className="text-sm font-semibold">QTools</span>
-        <div className="flex-1" />
-        {clipboardText && (
+        <div
+          data-tauri-drag-region
+          className="mb-2 flex items-center gap-2 select-none cursor-move"
+          onMouseDown={(e) => {
+            if (e.buttons === 1 && !(e.target as HTMLElement).closest("button")) {
+              void invoke("set_dragging", { dragging: true }).catch(() => {});
+            }
+          }}
+        >
+          <GripHorizontal className="size-3.5 text-muted-foreground" />
+          <span className="text-sm font-semibold">QTools</span>
+          <div className="flex-1" />
+          {clipboardText && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 gap-1 px-1.5 text-xs text-muted-foreground"
+              title="点击忽略本次剪贴板内容"
+              onClick={() => setClipboardText("")}
+            >
+              <ClipboardPaste className="size-3" />
+              已读取剪贴板
+            </Button>
+          )}
           <Button
             size="sm"
             variant="ghost"
-            className="h-7 gap-1 px-1.5 text-xs text-muted-foreground"
-            title="点击忽略本次剪贴板内容"
-            onClick={() => setClipboardText("")}
+            className="relative h-7 w-7 p-0"
+            aria-label={hasUpdate ? "设置（发现新版本，可更新）" : "设置"}
+            title={hasUpdate ? "设置（发现新版本，可更新）" : "设置"}
+            onClick={() => setShowSettings(true)}
           >
-            <ClipboardPaste className="size-3" />
-            已读取剪贴板
+            <Settings className="size-3.5" />
+            {hasUpdate && (
+              <span
+                aria-hidden
+                className="absolute right-0 top-0 size-2 rounded-full bg-destructive ring-2 ring-background"
+              />
+            )}
           </Button>
-        )}
-        <Button
-          size="sm"
-          variant="ghost"
-          className="relative h-7 w-7 p-0"
-          title={hasUpdate ? "设置（发现新版本，可更新）" : "设置"}
-          onClick={() => setShowSettings(true)}
-        >
-          <Settings className="size-3.5" />
-          {hasUpdate && (
-            <span
-              aria-hidden
-              className="absolute right-0 top-0 size-2 rounded-full bg-destructive ring-2 ring-background"
-            />
-          )}
-        </Button>
-      </div>
+        </div>
 
       {!hasKey && !bannerDismissed && (
         <div
@@ -922,6 +1122,7 @@ function App() {
           <button
             type="button"
             className="shrink-0 opacity-70 hover:opacity-100"
+            aria-label="本次运行内隐藏提示"
             title="本次运行内隐藏提示"
             onClick={() => setBannerDismissed(true)}
           >
@@ -937,57 +1138,82 @@ function App() {
         </div>
       )}
 
-      <Tabs defaultValue="translate" className="flex flex-1 flex-col gap-3">
-        <TabsList variant="default" className="w-full max-w-full justify-start">
-          <TabsTrigger value="translate">
-            <Languages className="size-3.5" />
-            翻译
-          </TabsTrigger>
-          <TabsTrigger value="naming">
-            <Variable className="size-3.5" />
-            命名
-          </TabsTrigger>
-          {config.custom_prompts.map((p) => (
-            <TabsTrigger key={p.id} value={p.id}>
-              <MessageSquare className="size-3.5" />
-              {p.name}
+        <Tabs
+          value={activeTab}
+          onValueChange={(v) => v && setActiveTab(v)}
+          className="flex flex-1 flex-col gap-3"
+        >
+          <TabsList
+            variant="default"
+            className="w-full max-w-full justify-start"
+            onWheel={(e) => {
+              // 标签很多时鼠标滚轮也能横向滚动，避免只能拖滚动条
+              const el = e.currentTarget;
+              if (el.scrollWidth > el.clientWidth) {
+                el.scrollLeft += e.deltaY + e.deltaX;
+              }
+            }}
+          >
+            <TabsTrigger value="translate">
+              <Languages className="size-3.5" />
+              翻译
             </TabsTrigger>
-          ))}
-        </TabsList>
+            <TabsTrigger value="naming">
+              <Variable className="size-3.5" />
+              命名
+            </TabsTrigger>
+            {config.custom_prompts.map((p) => (
+              <TabsTrigger
+                key={p.id}
+                value={p.id}
+                className="min-w-0 max-w-20 px-1"
+                title={p.name}
+              >
+                <span className="min-w-0 truncate">{p.name}</span>
+              </TabsTrigger>
+            ))}
+          </TabsList>
 
-        {/* keepMounted：切标签页不再丢掉已经生成的输入与输出 */}
-        <TabsContent value="translate" keepMounted className="flex-1 overflow-auto">
-          <TranslatePanel
-            config={config}
-            getApiKey={getApiKey}
-            clipboardText={clipboardText}
-            wipeToken={wipeToken}
-          />
-        </TabsContent>
-        <TabsContent value="naming" keepMounted className="flex-1 overflow-auto">
-          <NamingPanel
-            config={config}
-            getApiKey={getApiKey}
-            clipboardText={clipboardText}
-            wipeToken={wipeToken}
-          />
-        </TabsContent>
-        {config.custom_prompts.map((p) => (
-          <TabsContent key={p.id} value={p.id} keepMounted className="flex-1 overflow-auto">
-            <CustomPromptPanel
+          {/* keepMounted：切标签页不再丢掉已经生成的输入与输出 */}
+          <TabsContent value="translate" keepMounted className="flex-1 overflow-auto">
+            <TranslatePanel
               config={config}
               getApiKey={getApiKey}
-              prompt={p}
               clipboardText={clipboardText}
               wipeToken={wipeToken}
+              active={activeTab === "translate"}
+              focusToken={focusToken}
             />
           </TabsContent>
-        ))}
-      </Tabs>
+          <TabsContent value="naming" keepMounted className="flex-1 overflow-auto">
+            <NamingPanel
+              config={config}
+              getApiKey={getApiKey}
+              clipboardText={clipboardText}
+              wipeToken={wipeToken}
+              active={activeTab === "naming"}
+              focusToken={focusToken}
+            />
+          </TabsContent>
+          {config.custom_prompts.map((p) => (
+            <TabsContent key={p.id} value={p.id} keepMounted className="flex-1 overflow-auto">
+              <CustomPromptPanel
+                config={config}
+                getApiKey={getApiKey}
+                prompt={p}
+                clipboardText={clipboardText}
+                wipeToken={wipeToken}
+                active={activeTab === p.id}
+                focusToken={focusToken}
+              />
+            </TabsContent>
+          ))}
+        </Tabs>
+      </div>
 
       <SettingsPanel
         open={showSettings}
-        onClose={() => setShowSettings(false)}
+        onClose={closeSettings}
         onConfigSaved={refreshStatus}
         hasUpdate={hasUpdate}
       />

@@ -6,9 +6,7 @@
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
-    "global-shortcut:default",
-    "clipboard-manager:default",
-    "autostart:default",
+    "core:window:allow-hide",
     "updater:default",
     "process:allow-restart"
   ]
